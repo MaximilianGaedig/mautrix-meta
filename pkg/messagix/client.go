@@ -65,6 +65,10 @@ type Client struct {
 	stopCurrentConnections atomic.Pointer[context.CancelFunc]
 	connectionLoopStopped  *exsync.Event
 	canSendMessages        *exsync.Event
+
+	presenceLock     sync.Mutex
+	presence         *presenceClient
+	presenceContacts []string
 }
 
 var MaxConnectBackoff = 5 * time.Minute
@@ -310,6 +314,7 @@ func (c *Client) Disconnect() {
 	if fn := c.stopCurrentConnections.Load(); fn != nil {
 		(*fn)()
 	}
+	c.StopPresenceStream()
 	c.socket.Disconnect()
 	if !c.connectionLoopStopped.WaitTimeout(5 * time.Second) {
 		c.Logger.Warn().Msg("Connection loop didn't stop in time")
