@@ -31,6 +31,7 @@ type Config struct {
 
 	// Only affects E2EE chats right now.
 	SendPresenceOnTyping      bool `yaml:"send_presence_on_typing"`
+	PresenceBridging          bool `yaml:"presence_bridging"`
 	DisableViewOnce           bool `yaml:"disable_view_once"`
 	MarketplaceSpace          bool `yaml:"marketplace_space"`
 	LogRedactedLoginResponses bool `yaml:"log_redacted_login_responses"`
@@ -75,6 +76,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Int, "force_refresh_interval_seconds")
 	helper.Copy(up.Bool, "cache_connection_state")
 	helper.Copy(up.Bool, "send_presence_on_typing")
+	helper.Copy(up.Bool, "presence_bridging")
 	helper.Copy(up.Bool, "disable_view_once")
 	helper.Copy(up.Bool, "marketplace_space")
 	helper.Copy(up.Bool, "log_redacted_login_responses")

@@ -82,6 +82,7 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 		go m.tryConnectE2EE(false)
 		m.metaState = status.BridgeState{StateEvent: status.StateConnected}
 		m.UserLogin.BridgeState.Send(m.metaState)
+		m.startPresenceStream(ctx)
 		if tbl := m.initialTable.Swap(nil); tbl != nil {
 			log.Debug().Msg("Handling cached initial table")
 			m.parseAndQueueTable(ctx, tbl, true)
@@ -106,6 +107,7 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 			go m.tryConnectE2EE(false)
 		}
 		log.Debug().Msg("Reconnected to Meta socket")
+		m.startPresenceStream(ctx)
 		m.connectWaiter.Set()
 		m.metaState = status.BridgeState{StateEvent: status.StateConnected}
 		m.UserLogin.BridgeState.Send(m.metaState)
@@ -129,12 +131,20 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 		if stopPeriodicReconnect := m.stopPeriodicReconnect.Swap(nil); stopPeriodicReconnect != nil {
 			(*stopPeriodicReconnect)()
 		}
+	case *messagix.PresenceEvent:
+		m.handlePresencePublish(evt)
+	case *messagix.PresenceStreamClosedEvent:
+		m.handlePresenceStreamClosed()
 	default:
 		log.Warn().Type("event_type", evt).Msg("Unrecognized event type from messagix")
 	}
 }
 
 func (m *MetaClient) parseAndQueueTable(ctx context.Context, tbl *table.LSTable, isInitial bool) {
+	if log := zerolog.Ctx(ctx); log.GetLevel() <= zerolog.TraceLevel {
+		log.Trace().Strs("table_types", tbl.NonNilFields()).Bool("is_initial", isInitial).Msg("Received LS table types")
+	}
+	m.handleTablePresence(ctx, tbl)
 	evts := m.parseTable(ctx, tbl)
 	wrapped := &parsedTable{
 		Table:     tbl,

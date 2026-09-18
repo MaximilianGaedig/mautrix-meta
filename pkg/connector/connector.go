@@ -11,6 +11,7 @@ import (
 	"go.mau.fi/mautrix-meta/pkg/metadb"
 	"go.mau.fi/mautrix-meta/pkg/msgconv"
 	"go.mau.fi/mautrix-meta/pkg/msgconv/mediadl"
+	"go.mau.fi/mautrix-meta/pkg/presence"
 )
 
 type MetaConnector struct {
@@ -19,6 +20,8 @@ type MetaConnector struct {
 	MsgConv     *msgconv.MessageConverter
 	DeviceStore *sqlstore.Container
 	DB          *metadb.MetaDB
+
+	presence *presence.Manager
 }
 
 var (
@@ -50,6 +53,7 @@ func (m *MetaConnector) Start(ctx context.Context) error {
 	if err != nil {
 		return bridgev2.DBUpgradeError{Err: err, Section: "meta"}
 	}
+	m.startPresence(ctx)
 	return nil
 }
 

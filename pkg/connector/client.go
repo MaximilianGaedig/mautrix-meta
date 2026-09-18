@@ -70,6 +70,9 @@ type MetaClient struct {
 	metaState status.BridgeState
 	waState   status.BridgeState
 
+	presenceTracker  presenceTracker
+	presenceContacts presenceContacts
+
 	waLastPresence waTypes.Presence
 }
 
@@ -563,6 +566,7 @@ func (m *MetaClient) disconnect(dumpState bool) (state json.RawMessage) {
 	if cli := m.Client; cli != nil {
 		cli.SetEventHandler(nil)
 		cli.Disconnect()
+		m.handlePresenceStreamClosed()
 		if dumpState && m.Main.Config.CacheConnectionState {
 			var err error
 			state, err = cli.DumpState()
