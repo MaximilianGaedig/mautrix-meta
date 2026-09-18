@@ -177,6 +177,15 @@ func (m *MetaClient) e2eeEventHandler(rawEvt any) bool {
 				},
 			})
 		}
+	case *events.CallOffer, *events.CallOfferNotice, *events.CallPreAccept, *events.CallAccept,
+		*events.CallTransport, *events.CallRelayLatency, *events.CallTerminate, *events.CallReject,
+		*events.UnknownCallEvent:
+		// Call bridging research (stage 0, listen only): nothing is sent back, but log the full
+		// signalling so the call flow of Messenger E2EE calls can be mapped from real traffic.
+		log.Info().
+			Type("event_type", rawEvt).
+			Any("call_event", evt).
+			Msg("Messenger E2EE call signalling")
 	default:
 		log.Debug().Type("event_type", rawEvt).Msg("Unhandled WhatsApp event")
 	}
