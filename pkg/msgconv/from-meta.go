@@ -36,6 +36,7 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
+	"go.mau.fi/mautrix-meta/pkg/album"
 	"go.mau.fi/mautrix-meta/pkg/messagix"
 	"go.mau.fi/mautrix-meta/pkg/messagix/socket"
 	"go.mau.fi/mautrix-meta/pkg/messagix/table"
@@ -115,6 +116,8 @@ func (mc *MessageConverter) ToMatrix(
 	// by later code.
 	importantPartIDs := []networkid.PartID{}
 	seenBlobFBIDs := map[string]bool{}
+	// Blob and legacy attachments sent in one message are marked as an album.
+	var albumItems []*bridgev2.ConvertedMessagePart
 	for i, blobAtt := range msg.BlobAttachments {
 		// Sometimes Facebook literally sends two exact copies
 		// of LSInsertBlobAttachment, byte for byte identical,
@@ -134,15 +137,20 @@ func (mc *MessageConverter) ToMatrix(
 		}
 		partID := networkid.PartID(fmt.Sprintf("blob_attachment_%d", i))
 		ctx := context.WithValue(ctx, mediadl.ContextKeyPartID, partID)
-		cm.Parts = append(cm.Parts, mc.blobAttachmentToMatrix(ctx, blobAtt, i))
+		attPart := mc.blobAttachmentToMatrix(ctx, blobAtt, i)
+		albumItems = append(albumItems, attPart)
+		cm.Parts = append(cm.Parts, attPart)
 		importantPartIDs = append(importantPartIDs, partID)
 	}
 	for i, legacyAtt := range msg.Attachments {
 		partID := networkid.PartID(fmt.Sprintf("attachment_%d", i))
 		ctx := context.WithValue(ctx, mediadl.ContextKeyPartID, partID)
-		cm.Parts = append(cm.Parts, mc.legacyAttachmentToMatrix(ctx, legacyAtt, i))
+		attPart := mc.legacyAttachmentToMatrix(ctx, legacyAtt, i)
+		albumItems = append(albumItems, attPart)
+		cm.Parts = append(cm.Parts, attPart)
 		importantPartIDs = append(importantPartIDs, partID)
 	}
+	album.Tag(albumItems, AlbumID(messageID))
 	var urlPreviews []*table.WrappedXMA
 	for i, xmaAtt := range msg.XMAAttachments {
 		partID := networkid.PartID(fmt.Sprintf("xma_attachment_%d", i))
@@ -294,6 +302,11 @@ func (mc *MessageConverter) ToMatrix(
 		cm.Parts[0].ID = importantPartIDs[0]
 	}
 	return cm
+}
+
+// AlbumID returns the fi.mau.album ID for the attachments of the given message.
+func AlbumID(messageID networkid.MessageID) string {
+	return "meta:" + string(messageID)
 }
 
 func errorToNotice(err error, attachmentContainerType string) *bridgev2.ConvertedMessagePart {

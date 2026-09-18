@@ -47,6 +47,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
+	"go.mau.fi/mautrix-meta/pkg/album"
 	"go.mau.fi/mautrix-meta/pkg/messagix"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 	"go.mau.fi/mautrix-meta/pkg/msgconv/mediadl"
@@ -654,6 +655,9 @@ func (mc *MessageConverter) waArmadilloGalleryToMatrix(ctx context.Context, mess
 			addImageMetadata(converted, img.GetAncillary())
 			parts[i] = converted
 		}
+	}
+	if msgID, ok := ctx.Value(mediadl.ContextKeyMsgID).(networkid.MessageID); ok {
+		album.Tag(parts, AlbumID(msgID))
 	}
 	return parts
 }
