@@ -103,16 +103,16 @@ func RelayAudioTransformedWith(ctx context.Context, src RTPReader, srcOpusPT uin
 			stats.Dropped.Add(1)
 			continue
 		}
+		if !loggedFirst {
+			loggedFirst = true
+			log.Info().Ints("source_extensions", extIDs(p)).Msg("First transformed audio frame relayed")
+		}
 		p.Payload = out
 		rw.Rewrite(p)
 		if err = dst.WriteRTP(p); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 			return err
 		}
 		stats.Forwarded.Add(1)
-		if !loggedFirst {
-			loggedFirst = true
-			log.Info().Msg("First transformed audio frame relayed")
-		}
 	}
 }
 

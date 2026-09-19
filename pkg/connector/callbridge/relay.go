@@ -45,8 +45,10 @@ type RTPWriter interface {
 // changes (e.g. after a peer renegotiates), so the receiver sees one
 // monotonic stream. SSRC and payload type are replaced by the writer.
 type Rewriter struct {
-	// AudioLevel, if both ids are set, keeps the audio level extension, moved from the source's id
-	// to the destination's (an SFU picks the speakers it forwards by it).
+	// AudioLevel, if To is set, stamps every packet with an RFC 6464 audio level under that id: the
+	// level from the source's From id when it has one, otherwise one derived from the payload (an
+	// Opus comfort-noise frame is a few bytes, speech is not). Messenger's SFU forwards only the
+	// streams it takes for active speakers, and an unlabelled stream is forwarded at a trickle.
 	AudioLevel struct{ From, To uint8 }
 	// FrameTicks spaces the first packet of a new source after the last one
 	// of the old source; 0 means one 20 ms Opus frame.
@@ -67,8 +69,13 @@ const opusFrameTicks = 960
 // Rewrite adjusts p in place.
 func (r *Rewriter) Rewrite(p *rtp.Packet) {
 	var level []byte
-	if r.AudioLevel.From != 0 && r.AudioLevel.To != 0 {
-		level = append(level, p.Header.GetExtension(r.AudioLevel.From)...)
+	if r.AudioLevel.To != 0 {
+		if r.AudioLevel.From != 0 {
+			level = append(level, p.Header.GetExtension(r.AudioLevel.From)...)
+		}
+		if len(level) == 0 {
+			level = []byte{audioLevelOf(p.Payload)}
+		}
 	}
 	defer func() {
 		if len(level) > 0 {
@@ -96,6 +103,24 @@ func (r *Rewriter) Rewrite(p *rtp.Packet) {
 	p.Timestamp += r.tsOffset
 	r.lastOutSeq = p.SequenceNumber
 	r.lastOutTS = p.Timestamp
+}
+
+// extIDs lists the header extension ids a packet carries, for logging.
+func extIDs(p *rtp.Packet) []int {
+	var out []int
+	for _, id := range p.Header.GetExtensionIDs() {
+		out = append(out, int(id))
+	}
+	return out
+}
+
+// audioLevelOf is the RFC 6464 byte (V bit plus the level in -dBov) for an Opus payload: a frame of
+// a few bytes is comfort noise or silence, anything larger is speech at a middling level.
+func audioLevelOf(payload []byte) byte {
+	if len(payload) <= 12 {
+		return 127
+	}
+	return 0x80 | 30
 }
 
 // RelayStats counts relayed and dropped packets of one direction.
@@ -149,14 +174,14 @@ func relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, s
 			stats.Dropped.Add(1)
 			continue
 		}
+		if !loggedFirst {
+			loggedFirst = true
+			log.Info().Ints("source_extensions", extIDs(p)).Msg("First " + kind + " packet relayed")
+		}
 		rw.Rewrite(p)
 		if err = dst.WriteRTP(p); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 			return err
 		}
 		stats.Forwarded.Add(1)
-		if !loggedFirst {
-			loggedFirst = true
-			log.Info().Msg("First " + kind + " packet relayed")
-		}
 	}
 }

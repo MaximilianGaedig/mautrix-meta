@@ -901,4 +901,18 @@ func TestRewriterAudioLevel(t *testing.T) {
 	if plain.Header.Extension {
 		t.Error("a rewriter without AudioLevel kept an extension")
 	}
+
+	// Without a level from the source, one is derived from the payload.
+	synth := &Rewriter{}
+	synth.AudioLevel.To = 1
+	speech := &rtp.Packet{Header: rtp.Header{Version: 2, SSRC: 1}, Payload: make([]byte, 120)}
+	synth.Rewrite(speech)
+	if got := speech.Header.GetExtension(1); len(got) != 1 || got[0]&0x80 == 0 || got[0]&0x7f == 127 {
+		t.Errorf("speech level %x, want a voice-active middling level", got)
+	}
+	silence := &rtp.Packet{Header: rtp.Header{Version: 2, SSRC: 2}, Payload: []byte{0xf8, 0xff, 0xfe}}
+	synth.Rewrite(silence)
+	if got := silence.Header.GetExtension(1); len(got) != 1 || got[0] != 127 {
+		t.Errorf("comfort noise level %x, want 7f", got)
+	}
 }
