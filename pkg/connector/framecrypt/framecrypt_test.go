@@ -272,8 +272,8 @@ func setupPair(t *testing.T, rt *Runtime) (alice, bob *party, acs *rtcsignal.E2e
 			c.cs.IdentityKeyMode, c.cs.DeviceID, c.cs.KeyNegotiationProt, len(c.cs.PreKeyBundle))
 	}
 
-	toAlice := buildServerState(map[string]testEndpoint{bob.e2eeID(): {bcs.PreKeyBundle, bcs.IdentityKeyMode, bcs.DeviceID}})
-	toBob := buildServerState(map[string]testEndpoint{alice.e2eeID(): {acs.PreKeyBundle, acs.IdentityKeyMode, acs.DeviceID}})
+	toAlice := buildServerState(map[string]testEndpoint{bob.e2eeID(): {PreKeyBundle: bcs.PreKeyBundle, IdentityKeyMode: bcs.IdentityKeyMode, DeviceID: bcs.DeviceID}})
+	toBob := buildServerState(map[string]testEndpoint{alice.e2eeID(): {PreKeyBundle: acs.PreKeyBundle, IdentityKeyMode: acs.IdentityKeyMode, DeviceID: acs.DeviceID}})
 	keyIndex = map[*party]string{}
 	for _, c := range []struct {
 		p     *party
@@ -441,7 +441,7 @@ func TestTwoPartyFrameExchange(t *testing.T) {
 	carol := newParty(t, rt, "carol", "100000000000003", "carolCnameCCCCCC", 5)
 	carol.peers[alice.userID] = alice.keyPair.PublicKey().Serialize()
 	if res, err := carol.km.ProcessE2eeServerUpdate(ctx, buildServerState(map[string]testEndpoint{
-		alice.e2eeID(): {acs.PreKeyBundle, acs.IdentityKeyMode, acs.DeviceID},
+		alice.e2eeID(): {PreKeyBundle: acs.PreKeyBundle, IdentityKeyMode: acs.IdentityKeyMode, DeviceID: acs.DeviceID},
 	})); err != nil || res.ErrorCode != 0 {
 		t.Fatalf("carol server update: %v %+v", err, res)
 	}
@@ -488,7 +488,7 @@ func TestServerStateMatchesCapture(t *testing.T) {
 		}
 		eps := map[string]testEndpoint{}
 		for k, e := range st.EndpointInfos {
-			eps[k] = testEndpoint{e.PreKeyBundle, e.IdentityKeyMode, e.DeviceID}
+			eps[k] = testEndpoint{PreKeyBundle: e.PreKeyBundle, IdentityKeyMode: e.IdentityKeyMode, DeviceID: e.DeviceID}
 		}
 		if got := buildServerState(eps); !bytes.Equal(got, s.Data) {
 			t.Fatalf("server state %d (%d bytes) differs from the rebuilt one (%d bytes):\n%s\nvs\n%s",

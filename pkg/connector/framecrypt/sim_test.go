@@ -76,7 +76,7 @@ func (c *call) pushState() {
 		for _, o := range c.members {
 			if o != p {
 				cs := c.cs[o]
-				eps[o.e2eeID()] = testEndpoint{cs.PreKeyBundle, cs.IdentityKeyMode, cs.DeviceID}
+				eps[o.e2eeID()] = testEndpoint{PreKeyBundle: cs.PreKeyBundle, IdentityKeyMode: cs.IdentityKeyMode, DeviceID: cs.DeviceID}
 			}
 		}
 		res, err := p.km.ProcessE2eeServerUpdate(context.Background(), buildServerStateWith(c.cfg, eps))
