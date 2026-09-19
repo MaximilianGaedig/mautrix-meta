@@ -249,6 +249,8 @@ type callSession struct {
 	joined         bool
 	metaAnswered   bool
 	metaPrepare    sync.Once
+	metaICEOnce    sync.Once
+	metaICE        []webrtc.ICEServer
 	metaAnswer     string // incoming: our signed answer, prepared while ringing
 	metaAnswerErr  error
 	mediaConnected atomic.Bool
@@ -418,6 +420,7 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 	}
 	switch sdpType {
 	case "answer":
+		callbridge.LogSDPShape(s.log.Debug(), sd.SDP).Msg("Messenger answer")
 		s.log.Info().Msg("Messenger peer answered")
 		if err := leg.SetAnswer(callbridge.PrepareMetaRemoteSDP(sd.SDP)); err != nil {
 			s.log.Err(err).Msg("Failed to apply Messenger answer")
@@ -577,7 +580,14 @@ func (s *callSession) verifyPeerSDP(sdp string, userID int64) error {
 
 // --- ICE servers ---
 
+// metaICEServers returns the Messenger leg's ICE servers, fetched once per
+// call (the TURN lookup is an HTTP round trip, done while Matrix rings).
 func (s *callSession) metaICEServers() []webrtc.ICEServer {
+	s.metaICEOnce.Do(func() { s.metaICE = s.fetchMetaICEServers() })
+	return s.metaICE
+}
+
+func (s *callSession) fetchMetaICEServers() []webrtc.ICEServer {
 	servers := []webrtc.ICEServer{{URLs: []string{messagix.MessengerSTUNServer}}}
 	turn, err := s.m.Client.FetchTURNServer(s.ctx)
 	if err != nil {
@@ -730,6 +740,7 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 		Bool("relay_info", ring.RelayInfo != nil).
 		Int16("retry", msg.Header.RetryCount).
 		Msg("Ringing Matrix for incoming Messenger call")
+	callbridge.LogSDPShape(s.log.Debug(), ring.Offer.SDP).Msg("Messenger offer")
 	if err = s.verifyPeerSDP(ring.Offer.SDP, caller); err != nil {
 		s.log.Warn().Err(err).Msg("Caller's x-dtls-auth doesn't verify, not bridging")
 		s.end(endFailed, "")
@@ -740,11 +751,10 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 		s.end(endFailed, "")
 		return
 	}
-	go func() {
-		if _, err := s.prepareMessengerAnswer(); err != nil {
-			s.log.Warn().Err(err).Msg("Failed to prepare Messenger answer while ringing")
-		}
-	}()
+	// Only the TURN lookup happens while ringing. Creating the leg early let
+	// Pion start connectivity checks towards a caller that didn't know our
+	// credentials yet; the failed early checks slowed ICE down after the JOIN.
+	go s.metaICEServers()
 	time.AfterFunc(callInviteLifetime, func() {
 		s.lock.Lock()
 		answered := s.mxAnswered
@@ -951,13 +961,22 @@ func (s *callSession) relayVideo(from, to *callbridge.Leg) {
 		from.RequestKeyframe(ssrc)
 	}
 	to.OnKeyframeRequest(requestKeyframe)
-	for _, d := range []time.Duration{0, time.Second, 3 * time.Second} {
-		time.AfterFunc(d, func() {
-			if s.ctx.Err() == nil {
-				requestKeyframe()
+	// Keyframes requested before the receiving leg is connected are wasted,
+	// and browsers only send one on request: ask once `to` is connected and
+	// a few times after, so the first frames decode.
+	go func() {
+		for s.ctx.Err() == nil && to.PC.ConnectionState() != webrtc.PeerConnectionStateConnected {
+			time.Sleep(100 * time.Millisecond)
+		}
+		for _, d := range []time.Duration{0, 500 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second} {
+			time.Sleep(d)
+			if s.ctx.Err() != nil {
+				return
 			}
-		})
-	}
+			lastPLI.Store(0)
+			requestKeyframe()
+		}
+	}()
 	var stats callbridge.RelayStats
 	rlog := s.log.With().Str("from", from.Name).Str("to", to.Name).Str("codec", tr.Codec().MimeType).Logger()
 	err = callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), to.LocalVideo, &stats, rlog)
@@ -1356,7 +1375,42 @@ func (cb *callBridge) handleMatrixEvent(ctx context.Context, portal *bridgev2.Po
 	case event.CallSelectAnswer:
 		// Outgoing: Element selects our answer. Nothing to do.
 	case event.CallNegotiate:
-		s.log.Warn().Msg("m.call.negotiate isn't supported, ignoring")
+		neg, ok := parseCallContent[event.CallNegotiateEventContent](evt)
+		if ok {
+			go s.onMatrixNegotiate(neg)
+		}
+	}
+}
+
+// onMatrixNegotiate answers Element's renegotiation (e.g. turning the camera
+// on in a voice call), so its call stays up. The Messenger side isn't
+// renegotiated: video added mid-call only flows if the call started as video.
+func (s *callSession) onMatrixNegotiate(neg *event.CallNegotiateEventContent) {
+	if neg == nil || neg.Description.Type != event.CallDataTypeOffer || neg.Description.SDP == "" {
+		return
+	}
+	s.lock.Lock()
+	leg := s.mxLeg
+	s.lock.Unlock()
+	if leg == nil {
+		return
+	}
+	answer, err := leg.AnswerOffer(neg.Description.SDP)
+	if err != nil {
+		s.log.Err(err).Msg("Failed to answer Element's renegotiation")
+		return
+	}
+	s.log.Info().
+		Bool("element_sends_video", callbridge.SendsVideo(neg.Description.SDP)).
+		Bool("bridge_has_video", s.videoCodec != "").
+		Msg("Answering Element's renegotiation")
+	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallNegotiate, &event.Content{Parsed: &event.CallNegotiateEventContent{
+		BaseCallEventContent: s.baseCallContent(),
+		Lifetime:             int(callInviteLifetime / time.Millisecond),
+		Description:          event.CallData{SDP: answer, Type: event.CallDataTypeAnswer},
+	}}, nil)
+	if err != nil {
+		s.log.Err(err).Msg("Failed to send m.call.negotiate answer")
 	}
 }
 

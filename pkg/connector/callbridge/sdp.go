@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/pion/webrtc/v4"
+	"github.com/rs/zerolog"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 )
@@ -175,4 +176,58 @@ func videoRtpmap(sdp string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// LogSDPShape adds the shape of an SDP to a log event without anything
+// identifying (no addresses, ICE credentials, fingerprints or keys): per
+// m-section the kind, direction, codecs, SSRC count and whether it uses
+// simulcast/RIDs, plus the header extensions and the semantics hint.
+func LogSDPShape(e *zerolog.Event, sdp string) *zerolog.Event {
+	type section struct {
+		Kind      string   `json:"kind"`
+		Port0     bool     `json:"port0,omitempty"`
+		Dir       string   `json:"dir,omitempty"`
+		MID       string   `json:"mid,omitempty"`
+		Codecs    []string `json:"codecs,omitempty"`
+		SSRCs     int      `json:"ssrcs,omitempty"`
+		MSIDs     int      `json:"msids,omitempty"`
+		Simulcast bool     `json:"simulcast,omitempty"`
+		Exts      []string `json:"exts,omitempty"`
+	}
+	var secs []*section
+	var cur *section
+	ssrcs := map[string]bool{}
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "m="):
+			f := strings.Fields(line[2:])
+			cur = &section{Kind: f[0], Port0: len(f) > 1 && f[1] == "0"}
+			secs = append(secs, cur)
+			ssrcs = map[string]bool{}
+		case cur == nil:
+		case line == "a=sendrecv" || line == "a=sendonly" || line == "a=recvonly" || line == "a=inactive":
+			cur.Dir = line[2:]
+		case strings.HasPrefix(line, "a=mid:"):
+			cur.MID = line[6:]
+		case strings.HasPrefix(line, "a=rtpmap:"):
+			if f := strings.Fields(line); len(f) == 2 {
+				cur.Codecs = append(cur.Codecs, strings.TrimPrefix(f[0], "a=rtpmap:")+" "+f[1])
+			}
+		case strings.HasPrefix(line, "a=ssrc:"):
+			if f := strings.Fields(line[7:]); len(f) > 0 && !ssrcs[f[0]] {
+				ssrcs[f[0]] = true
+				cur.SSRCs++
+			}
+		case strings.HasPrefix(line, "a=msid:"):
+			cur.MSIDs++
+		case strings.HasPrefix(line, "a=simulcast") || strings.HasPrefix(line, "a=rid:"):
+			cur.Simulcast = true
+		case strings.HasPrefix(line, "a=extmap:"):
+			if f := strings.Fields(line); len(f) >= 2 {
+				cur.Exts = append(cur.Exts, f[1])
+			}
+		}
+	}
+	return e.Interface("sdp_shape", secs)
 }

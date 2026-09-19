@@ -133,6 +133,12 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	se.SetSrflxAcceptanceMinWait(50 * time.Millisecond)
 	se.SetPrflxAcceptanceMinWait(100 * time.Millisecond)
 	se.SetRelayAcceptanceMinWait(200 * time.Millisecond)
+	// Pion's DTLS retransmits after 1 s; a lost first flight cost a second
+	// of silence after ICE connected.
+	se.SetDTLSRetransmissionInterval(100 * time.Millisecond)
+	// Pion's own warnings (e.g. RTP for an SSRC no transceiver claims, so
+	// no track ever starts) go to the call log.
+	se.LoggerFactory = &pionLoggerFactory{log: cfg.Log.With().Str("leg", cfg.Name).Logger()}
 	opts := []func(*webrtc.API){
 		webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir), webrtc.WithSettingEngine(se),
 	}

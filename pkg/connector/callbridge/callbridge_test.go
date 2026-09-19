@@ -474,3 +474,25 @@ func TestVideoSDPHelpers(t *testing.T) {
 		t.Fatal("audio-only / disabled video")
 	}
 }
+
+func TestLogSDPShapeHasNoSecrets(t *testing.T) {
+	sdp := "v=0\r\no=- 1 2 IN IP4 203.0.113.9\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 203.0.113.9\r\n" +
+		"a=ice-ufrag:SECRETUFRAG\r\na=ice-pwd:SECRETPWD\r\na=fingerprint:sha-256 AB:CD\r\na=x-dtls-auth:SECRETAUTH\r\n" +
+		"a=candidate:1 1 udp 1 203.0.113.9 5000 typ host\r\na=mid:0\r\na=sendrecv\r\na=rtpmap:111 opus/48000/2\r\n" +
+		"a=ssrc:1 cname:x\r\na=ssrc:2 cname:x\r\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\r\n" +
+		"m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:1\r\na=recvonly\r\na=rtpmap:96 VP8/90000\r\n"
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+	LogSDPShape(log.Info(), sdp).Msg("x")
+	out := buf.String()
+	for _, secret := range []string{"SECRET", "203.0.113", "AB:CD"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("shape log leaks %q: %s", secret, out)
+		}
+	}
+	for _, want := range []string{`"ssrcs":2`, `"dir":"recvonly"`, "VP8/90000", "sdes:mid"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("shape log misses %q: %s", want, out)
+		}
+	}
+}
