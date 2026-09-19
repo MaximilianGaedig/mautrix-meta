@@ -498,15 +498,19 @@ func (g *groupCall) relayUserAudio(rtc *callbridge.RTCLeg) {
 		g.lock.Unlock()
 		if leg != nil && joined {
 			log := g.log.With().Str("from", "matrixrtc").Logger()
+			rw := &callbridge.Rewriter{}
+			rw.AudioLevel.From = rtc.HeaderExtensionID(tr, callbridge.AudioLevelURI)
+			rw.AudioLevel.To = leg.AudioHeaderExtensionID(callbridge.AudioLevelURI)
+			log.Info().Uint8("audio_level_from", rw.AudioLevel.From).Uint8("audio_level_to", rw.AudioLevel.To).Msg("Relaying the Matrix user's audio")
 			if crypt != nil {
 				var stats callbridge.FrameRelayStats
-				err = callbridge.RelayAudioTransformed(g.ctx, tr, uint8(tr.PayloadType()), leg.Local, crypt.encryptTransform(log), &stats, log)
+				err = callbridge.RelayAudioTransformedWith(g.ctx, tr, uint8(tr.PayloadType()), leg.Local, crypt.encryptTransform(log), &stats, log, rw)
 				g.log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).
 					Uint64("frames", stats.Frames.Load()).Uint64("failed", stats.Failed.Load()).Msg("Matrix audio relay stopped")
 				return
 			}
 			var stats callbridge.RelayStats
-			err = callbridge.Relay(g.ctx, tr, uint8(tr.PayloadType()), leg.Local, &stats, log)
+			err = callbridge.RelayWith(g.ctx, tr, uint8(tr.PayloadType()), leg.Local, &stats, log, rw)
 			g.log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Matrix audio relay stopped")
 			return
 		}

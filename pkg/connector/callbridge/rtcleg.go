@@ -60,6 +60,7 @@ type RTCLeg struct {
 	remoteAudio chan *webrtc.TrackRemote
 	remoteVideo chan *webrtc.TrackRemote
 	owners      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant
+	receivers   map[*webrtc.TrackRemote]*webrtc.RTPReceiver
 	onPeers     func(identities []string)
 	onKeyframe  func()
 	closed      bool
@@ -78,6 +79,7 @@ func JoinRTC(ctx context.Context, cfg RTCLegConfig) (*RTCLeg, error) {
 		remoteAudio: make(chan *webrtc.TrackRemote, 1),
 		remoteVideo: make(chan *webrtc.TrackRemote, 1),
 		owners:      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant{},
+		receivers:   map[*webrtc.TrackRemote]*webrtc.RTPReceiver{},
 	}
 	cb := lksdk.NewRoomCallback()
 	cb.OnTrackSubscribed = l.onTrackSubscribed
@@ -255,12 +257,34 @@ func (l *RTCLeg) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteT
 		return
 	}
 	l.owners[track] = rp
+	l.receivers[track] = pub.Receiver()
 	// Keep the newest: a participant who rejoins replaces their old track.
 	select {
 	case <-ch:
 	default:
 	}
 	ch <- track
+}
+
+// HeaderExtensionID returns the id a subscribed track's packets carry the header extension uri
+// under, or 0.
+func (l *RTCLeg) HeaderExtensionID(track *webrtc.TrackRemote, uri string) uint8 {
+	l.mu.Lock()
+	recv := l.receivers[track]
+	l.mu.Unlock()
+	if recv == nil {
+		return 0
+	}
+	return extensionID(recv.GetParameters().HeaderExtensions, uri)
+}
+
+func extensionID(exts []webrtc.RTPHeaderExtensionParameter, uri string) uint8 {
+	for _, e := range exts {
+		if e.URI == uri {
+			return uint8(e.ID)
+		}
+	}
+	return 0
 }
 
 // RequestKeyframe asks the publisher of a subscribed video track for a keyframe (through the SFU).

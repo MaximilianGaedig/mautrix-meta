@@ -45,6 +45,9 @@ type RTPWriter interface {
 // changes (e.g. after a peer renegotiates), so the receiver sees one
 // monotonic stream. SSRC and payload type are replaced by the writer.
 type Rewriter struct {
+	// AudioLevel, if both ids are set, keeps the audio level extension, moved from the source's id
+	// to the destination's (an SFU picks the speakers it forwards by it).
+	AudioLevel struct{ From, To uint8 }
 	// FrameTicks spaces the first packet of a new source after the last one
 	// of the old source; 0 means one 20 ms Opus frame.
 	FrameTicks uint32
@@ -63,6 +66,15 @@ const opusFrameTicks = 960
 
 // Rewrite adjusts p in place.
 func (r *Rewriter) Rewrite(p *rtp.Packet) {
+	var level []byte
+	if r.AudioLevel.From != 0 && r.AudioLevel.To != 0 {
+		level = append(level, p.Header.GetExtension(r.AudioLevel.From)...)
+	}
+	defer func() {
+		if len(level) > 0 {
+			_ = p.Header.SetExtension(r.AudioLevel.To, level)
+		}
+	}()
 	p.Header.Extension = false
 	p.Header.Extensions = nil
 	p.Header.ExtensionProfile = 0
@@ -97,6 +109,11 @@ type RelayStats struct {
 // since only Opus is negotiated on the other leg.
 func Relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger) error {
 	return relay(ctx, src, srcOpusPT, dst, stats, log, &Rewriter{}, "audio")
+}
+
+// RelayWith relays Opus like Relay through rw.
+func RelayWith(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw *Rewriter) error {
+	return relay(ctx, src, srcOpusPT, dst, stats, log, rw, "audio")
 }
 
 // VideoFrameTicks is one frame at 30 fps on the 90 kHz video clock.

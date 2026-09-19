@@ -75,7 +75,11 @@ type FrameRelayStats struct {
 
 // RelayAudioTransformed relays Opus like Relay, running every payload (one Opus frame) through xf.
 func RelayAudioTransformed(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, xf FrameTransform, stats *FrameRelayStats, log zerolog.Logger) error {
-	rw := &Rewriter{}
+	return RelayAudioTransformedWith(ctx, src, srcOpusPT, dst, xf, stats, log, &Rewriter{})
+}
+
+// RelayAudioTransformedWith relays like RelayAudioTransformed through rw.
+func RelayAudioTransformedWith(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, xf FrameTransform, stats *FrameRelayStats, log zerolog.Logger, rw *Rewriter) error {
 	loggedFirst := false
 	for {
 		if ctx.Err() != nil {

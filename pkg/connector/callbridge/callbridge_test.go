@@ -877,3 +877,28 @@ func TestSFUOfferExtensions(t *testing.T) {
 		t.Error("the audio section doesn't declare the MID extension")
 	}
 }
+
+// TestRewriterAudioLevel: the audio level survives the extension stripping, under the destination's id.
+func TestRewriterAudioLevel(t *testing.T) {
+	rw := &Rewriter{}
+	rw.AudioLevel.From, rw.AudioLevel.To = 10, 1
+	p := &rtp.Packet{Header: rtp.Header{Version: 2, SSRC: 1}}
+	_ = p.Header.SetExtension(10, []byte{0x85})
+	_ = p.Header.SetExtension(3, []byte{1, 2, 3})
+	rw.Rewrite(p)
+	if got := p.Header.GetExtension(1); len(got) != 1 || got[0] != 0x85 {
+		t.Errorf("audio level %x under id 1, want 85", got)
+	}
+	if p.Header.GetExtension(10) != nil || p.Header.GetExtension(3) != nil {
+		t.Error("other extensions weren't stripped")
+	}
+	if _, err := p.Marshal(); err != nil {
+		t.Fatal(err)
+	}
+	plain := &rtp.Packet{Header: rtp.Header{Version: 2, SSRC: 1}}
+	_ = plain.Header.SetExtension(10, []byte{0x85})
+	(&Rewriter{}).Rewrite(plain)
+	if plain.Header.Extension {
+		t.Error("a rewriter without AudioLevel kept an extension")
+	}
+}

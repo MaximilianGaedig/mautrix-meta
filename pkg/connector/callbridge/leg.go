@@ -497,6 +497,18 @@ func videoCapability(mime string) webrtc.RTPCodecCapability {
 	return c
 }
 
+// AudioLevelURI is the RTP header extension carrying an audio packet's level (RFC 6464).
+const AudioLevelURI = "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+
+// AudioHeaderExtensionID returns the id our audio packets carry the header extension uri under, or 0
+// if it wasn't negotiated.
+func (l *Leg) AudioHeaderExtensionID(uri string) uint8 {
+	if l.sender == nil {
+		return 0
+	}
+	return extensionID(l.sender.GetParameters().HeaderExtensions, uri)
+}
+
 // webHeaderExtensions are the RTP header extensions of the web client's SFU offer that Pion supports.
 var webHeaderExtensions = []struct {
 	uri  string
