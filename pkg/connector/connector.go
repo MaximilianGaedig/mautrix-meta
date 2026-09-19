@@ -54,6 +54,7 @@ func (m *MetaConnector) Start(ctx context.Context) error {
 		return bridgev2.DBUpgradeError{Err: err, Section: "meta"}
 	}
 	m.startPresence(ctx)
+	m.registerCallEventHandlers()
 	return nil
 }
 

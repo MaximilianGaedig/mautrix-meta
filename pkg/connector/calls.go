@@ -447,7 +447,7 @@ func (m *MetaClient) callNoticesEnabled() bool {
 // handleE2EENode is the messagix E2EENodeTap; it runs on the websocket read
 // loop, so the real work happens in a goroutine.
 func (m *MetaClient) handleE2EENode(node *waBinary.Node) {
-	if node.Tag != "notification" || !m.callNoticesEnabled() {
+	if node.Tag != "notification" || (!m.callNoticesEnabled() && !m.callBridgingEnabled()) {
 		return
 	}
 	if typ, _ := node.Attrs["type"].(string); typ != "fb:call" {
@@ -464,13 +464,18 @@ func (m *MetaClient) handleFBCallNotification(node *waBinary.Node) {
 		return
 	}
 	evt.Portal = m.makeWAPortalKey(chat)
+	if evt.Kind == callEnded {
+		m.handleFBCallEnded(evt.CallID)
+	}
 	log.Debug().
 		Int("kind", int(evt.Kind)).
 		Int64("actor", evt.Actor).
 		Bool("has_call_id", evt.CallID != "").
 		Dur("duration", evt.Duration).
 		Msg("Received Messenger call notification")
-	m.queueCallNotice(m.calls.Observe(evt))
+	if m.callNoticesEnabled() {
+		m.queueCallNotice(m.calls.Observe(evt))
+	}
 }
 
 // handleTableCalls feeds the LS call SPs to the tracker after callLSGrace.

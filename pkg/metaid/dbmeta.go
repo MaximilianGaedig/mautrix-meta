@@ -48,6 +48,9 @@ type UserLoginMetadata struct {
 	IGID           string                     `json:"igid,omitempty"`
 	NativeSession  *types.NativeSession       `json:"native_session,omitempty"`
 	NativePushKeys *pushcrypto.NativePushKeys `json:"native_push_keys,omitempty"`
+	// CallDeviceID is the stable device id of the call-signalling
+	// channels (x-dgw-deviceid on rpsignaling, cid on /t_rtc_multi).
+	CallDeviceID string `json:"call_device_id,omitempty"`
 
 	// Thread backfill state
 	BackfillCompleted bool `json:"backfill_completed,omitempty"`

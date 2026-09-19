@@ -41,6 +41,13 @@ presence_bridging: true
 # ("Incoming voice call - answer on Messenger", "Missed voice call", "Call ended (1:14)").
 # Calls themselves are not bridged; answer them in a Messenger app.
 call_notices: true
+# Experimental: bridge 1:1 Messenger voice calls to Matrix legacy VoIP (m.call.*).
+# Incoming calls ring the Matrix room (from the caller's ghost); answering in
+# Element makes the bridge join the call as your bridge device and relay the
+# audio. m.call.invite in a 1:1 room places a Messenger call. Needs the bridge's
+# Messenger E2EE device and network access to Meta's TURN servers.
+# Calling is abuse-monitored by Meta, so this is off by default.
+call_bridging: false
 # Should view-once messages be disabled entirely?
 disable_view_once: false
 # Should FB marketplace chats have a separate space inside the main Facebook space?

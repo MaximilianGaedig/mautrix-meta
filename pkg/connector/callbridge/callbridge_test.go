@@ -1,0 +1,304 @@
+// mautrix-meta - A Matrix-Facebook Messenger and Instagram DM puppeting bridge.
+// Copyright (C) 2026 Tulir Asokan
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package callbridge
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pion/ice/v4"
+	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
+	"github.com/rs/zerolog"
+	"go.mau.fi/libsignal/ecc"
+
+	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
+)
+
+// loopbackSettings keeps ICE on 127.0.0.1 without mDNS, so tests need no
+// network.
+func loopbackSettings() *webrtc.SettingEngine {
+	se := &webrtc.SettingEngine{}
+	se.SetIncludeLoopbackCandidate(true)
+	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	se.SetInterfaceFilter(func(name string) bool { return name == "lo" || name == "lo0" })
+	return se
+}
+
+func newTestLeg(t *testing.T, name string, pt uint8, webShape bool) *Leg {
+	t.Helper()
+	l, err := NewLeg(LegConfig{Name: name, OpusPT: pt, WebShape: webShape, Settings: loopbackSettings(), Log: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Close)
+	return l
+}
+
+func testIdentity(t *testing.T) *Identity {
+	t.Helper()
+	kp, err := ecc.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Identity{
+		UserID:   100000000000002,
+		DeviceID: 7,
+		Priv:     kp.PrivateKey().Serialize(),
+		Pub:      kp.PublicKey().PublicKey(),
+	}
+}
+
+// mLines returns "kind direction" per m-line of an SDP.
+func mLines(sdp string) []string {
+	var out []string
+	for _, sec := range strings.Split(sdp, "\r\nm=")[1:] {
+		kind, _, _ := strings.Cut(sec, " ")
+		sec += "\r\n"
+		dir := ""
+		if kind == "application" {
+			out = append(out, kind)
+			continue
+		}
+		for _, d := range []string{"sendrecv", "sendonly", "recvonly", "inactive"} {
+			if strings.Contains(sec, "\r\na="+d+"\r\n") {
+				dir = d
+			}
+		}
+		out = append(out, strings.TrimSpace(kind+" "+dir))
+	}
+	return out
+}
+
+// TestWebShapedSDP checks the SDP the bridge sends to Messenger, both as
+// callee (answering a web-shaped offer) and as caller (offering): audio +
+// video + application m-lines in one BUNDLE, Opus 111, upper-case
+// fingerprint, the web ice-options, and a valid x-dtls-auth.
+func TestWebShapedSDP(t *testing.T) {
+	id := testIdentity(t)
+
+	web := newTestLeg(t, "web", OpusPT, true)
+	webOffer, err := web.CreateOffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mLines(webOffer); fmt.Sprint(got) != "[audio sendrecv video recvonly application]" {
+		t.Fatalf("offer m-lines: %v", got)
+	}
+
+	meta := newTestLeg(t, "meta", OpusPT, true)
+	answer, err := meta.AnswerOffer(PrepareMetaRemoteSDP(webOffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := PrepareMetaLocalSDP(answer, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mLines(signed); fmt.Sprint(got) != "[audio sendrecv video inactive application]" {
+		t.Errorf("answer m-lines: %v", got)
+	}
+	for _, want := range []string{"a=group:BUNDLE 0 1 2", "a=rtpmap:111 opus/48000/2", webICEOptions, "a=msid:" + meta.StreamID + " " + meta.TrackID} {
+		if !strings.Contains(signed, want+"\r\n") {
+			t.Errorf("answer lacks %q", want)
+		}
+	}
+	fps := rtcsignal.SDPFingerprints(signed)
+	if len(fps) != 1 {
+		t.Fatalf("want one distinct fingerprint, got %d", len(fps))
+	}
+	if algo, digest, _ := strings.Cut(fps[0], " "); algo != "sha-256" || digest != strings.ToUpper(digest) {
+		t.Errorf("fingerprint not sha-256 with an upper-case digest")
+	}
+	info, err := rtcsignal.VerifyDTLSAuth(signed, id.UserID, append([]byte{ecc.DjbType}, id.Pub[:]...))
+	if err != nil {
+		t.Fatalf("x-dtls-auth does not verify: %v", err)
+	}
+	if info.DeviceID != id.DeviceID {
+		t.Errorf("device id %d", info.DeviceID)
+	}
+	if _, err = rtcsignal.VerifyDTLSAuth(signed, id.UserID+1, nil); err == nil {
+		t.Error("x-dtls-auth verifies for another user")
+	}
+	if AudioTrackID(signed) != meta.TrackID {
+		t.Errorf("AudioTrackID = %q", AudioTrackID(signed))
+	}
+	// The web side accepts the answer once x-dtls-auth is stripped.
+	if err = web.SetAnswer(PrepareMetaRemoteSDP(signed)); err != nil {
+		t.Fatalf("web peer rejects the answer: %v", err)
+	}
+
+	// As caller the bridge offers the same shape.
+	caller := newTestLeg(t, "meta-caller", OpusPT, true)
+	offer, err := caller.CreateOffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer, err = PrepareMetaLocalSDP(offer, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mLines(offer); fmt.Sprint(got) != "[audio sendrecv video recvonly application]" {
+		t.Errorf("caller offer m-lines: %v", got)
+	}
+	if _, err = rtcsignal.VerifyDTLSAuth(offer, id.UserID, nil); err != nil {
+		t.Errorf("caller offer x-dtls-auth: %v", err)
+	}
+}
+
+func TestRewriterSourceSwitch(t *testing.T) {
+	var rw Rewriter
+	pkt := func(ssrc uint32, seq uint16, ts uint32) *rtp.Packet {
+		p := &rtp.Packet{Header: rtp.Header{SSRC: ssrc, SequenceNumber: seq, Timestamp: ts}}
+		_ = p.Header.SetExtension(1, []byte{0x80})
+		return p
+	}
+	p1 := pkt(1, 100, 5000)
+	rw.Rewrite(p1)
+	p2 := pkt(1, 101, 5960)
+	rw.Rewrite(p2)
+	if p2.SequenceNumber != 101 || p2.Timestamp != 5960 || p2.Extension || p2.Extensions != nil {
+		t.Fatalf("same-source packet changed: %+v", p2.Header)
+	}
+	p3 := pkt(2, 60000, 123)
+	rw.Rewrite(p3)
+	if p3.SequenceNumber != 102 || p3.Timestamp != 5960+opusFrameTicks {
+		t.Fatalf("switched source not re-based: seq %d ts %d", p3.SequenceNumber, p3.Timestamp)
+	}
+	p4 := pkt(2, 60001, 123+960)
+	rw.Rewrite(p4)
+	if p4.SequenceNumber != 103 || p4.Timestamp != 5960+2*opusFrameTicks {
+		t.Fatalf("continuation wrong: seq %d ts %d", p4.SequenceNumber, p4.Timestamp)
+	}
+}
+
+// connect runs a full offer/answer (no trickle) between an offerer and an
+// answerer leg.
+func connect(t *testing.T, ctx context.Context, offerer, answerer *Leg) {
+	t.Helper()
+	if _, err := offerer.CreateOffer(); err != nil {
+		t.Fatal(err)
+	}
+	offer := offerer.WaitGathering(ctx, 5*time.Second)
+	if _, err := answerer.AnswerOffer(offer); err != nil {
+		t.Fatal(err)
+	}
+	answer := answerer.WaitGathering(ctx, 5*time.Second)
+	if err := offerer.SetAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLoopbackRelay connects two local peers through the bridge's two legs
+// and the relay, with different Opus payload types on each side, and checks
+// that Opus payloads arrive intact in both directions with the bridge's own
+// SSRCs and the receiving leg's payload type.
+func TestLoopbackRelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	log := zerolog.Nop()
+
+	// Messenger side: peer A offers with PT 111, the bridge's meta leg answers.
+	peerA := newTestLeg(t, "peerA", 111, true)
+	metaLeg := newTestLeg(t, "meta", 111, true)
+	// Matrix side: the bridge's matrix leg offers with PT 109, peer B answers.
+	mxLeg := newTestLeg(t, "matrix", 109, false)
+	peerB := newTestLeg(t, "peerB", 109, false)
+
+	connect(t, ctx, peerA, metaLeg)
+	connect(t, ctx, mxLeg, peerB)
+
+	// Both peers send; the bridge relays whatever arrives.
+	send := func(l *Leg, tag string) {
+		go func() {
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			for i := uint16(0); ; i++ {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+				_ = l.Local.WriteRTP(&rtp.Packet{
+					Header:  rtp.Header{Version: 2, SequenceNumber: 1000 + i, Timestamp: uint32(i) * 960, Marker: i == 0},
+					Payload: fmt.Appendf(nil, "%s-opus-%d", tag, i),
+				})
+			}
+		}()
+	}
+	send(peerA, "A")
+	send(peerB, "B")
+
+	var statsAB, statsBA RelayStats
+	go func() {
+		tr, err := metaLeg.RemoteTrack(ctx)
+		if err != nil {
+			return
+		}
+		_ = Relay(ctx, tr, uint8(tr.PayloadType()), mxLeg.Local, &statsAB, log)
+	}()
+	go func() {
+		tr, err := mxLeg.RemoteTrack(ctx)
+		if err != nil {
+			return
+		}
+		_ = Relay(ctx, tr, uint8(tr.PayloadType()), metaLeg.Local, &statsBA, log)
+	}()
+
+	expect := func(receiver *Leg, wantPT uint8, tag string, notSSRC uint32) {
+		t.Helper()
+		tr, err := receiver.RemoteTrack(ctx)
+		if err != nil {
+			t.Fatalf("%s: %v", receiver.Name, err)
+		}
+		got := 0
+		for got < 10 {
+			p, _, err := tr.ReadRTP()
+			if err != nil {
+				t.Fatalf("%s: read: %v", receiver.Name, err)
+			}
+			if p.PayloadType != wantPT {
+				t.Fatalf("%s: payload type %d, want %d", receiver.Name, p.PayloadType, wantPT)
+			}
+			if p.SSRC == notSSRC {
+				t.Fatalf("%s: SSRC was not remapped", receiver.Name)
+			}
+			if !bytes.HasPrefix(p.Payload, []byte(tag+"-opus-")) {
+				t.Fatalf("%s: unexpected payload %q", receiver.Name, p.Payload)
+			}
+			got++
+		}
+	}
+	senderSSRC := func(l *Leg) uint32 {
+		for _, s := range l.PC.GetSenders() {
+			if s.Track() != nil {
+				return uint32(s.GetParameters().Encodings[0].SSRC)
+			}
+		}
+		return 0
+	}
+	expect(peerB, 109, "A", senderSSRC(peerA))
+	expect(peerA, 111, "B", senderSSRC(peerB))
+	if statsAB.Forwarded.Load() == 0 || statsBA.Forwarded.Load() == 0 {
+		t.Fatalf("relay stats: A->B %d, B->A %d", statsAB.Forwarded.Load(), statsBA.Forwarded.Load())
+	}
+}

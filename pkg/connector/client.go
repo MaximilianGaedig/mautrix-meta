@@ -58,6 +58,7 @@ type MetaClient struct {
 	lastError24Reconnect  time.Time
 	connectWaiter         *exsync.Event
 	calls                 *callTracker
+	callBridge            atomic.Pointer[callBridge]
 	e2eeConnectWaiter     *exsync.Event
 	firstE2EEConnectDone  bool
 
@@ -567,6 +568,7 @@ func (m *MetaClient) disconnect(dumpState bool) (state json.RawMessage) {
 	if stopConnectAttempt := m.stopConnectAttempt.Swap(nil); stopConnectAttempt != nil {
 		(*stopConnectAttempt)()
 	}
+	m.stopCallBridging()
 	if cli := m.Client; cli != nil {
 		cli.SetEventHandler(nil)
 		cli.Disconnect()
