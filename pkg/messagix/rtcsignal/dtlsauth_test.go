@@ -18,17 +18,12 @@ package rtcsignal
 
 import (
 	"bytes"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
 
 	"go.mau.fi/libsignal/ecc"
-
-	"go.mau.fi/mautrix-meta/pkg/messagix/dgw"
 )
 
 func TestDtlsAuthMessageLayout(t *testing.T) {
@@ -86,36 +81,13 @@ func TestSignVerifyDTLSAuth(t *testing.T) {
 	}
 }
 
-// TestDtlsAuthHAR verifies the real x-dtls-auth attributes of a captured call:
-// the caller's (JOIN offer, signed by the sender) and the callee's (SMU
-// answer, signed by sdpOriginLocalId). Skipped unless RTCSIGNAL_HAR is set;
-// logs only pass/fail.
+// TestDtlsAuthHAR re-verifies every x-dtls-auth attribute in a capture:
+// JOIN offers/answers (signed by the header sender), SMU answers (signed by
+// sdpOriginLocalId) and RING offers (signed by the caller, delivered over
+// rpsignaling or /t_rtc_multi). Skipped unless RTCSIGNAL_HAR is set; logs
+// only pass/fail.
 func TestDtlsAuthHAR(t *testing.T) {
-	path := os.Getenv("RTCSIGNAL_HAR")
-	if path == "" {
-		t.Skip("RTCSIGNAL_HAR not set")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var har struct {
-		Log struct {
-			Entries []struct {
-				Request struct {
-					URL string `json:"url"`
-				} `json:"request"`
-				WebSocketMessages []struct {
-					Type   string `json:"type"`
-					Opcode int    `json:"opcode"`
-					Data   string `json:"data"`
-				} `json:"_webSocketMessages"`
-			} `json:"entries"`
-		} `json:"log"`
-	}
-	if err = json.Unmarshal(raw, &har); err != nil {
-		t.Fatal(err)
-	}
+	msgs := loadHARMessages(t)
 	checked := 0
 	check := func(what, sdp, uidStr string) {
 		uid, err := strconv.ParseInt(uidStr, 10, 64)
@@ -132,34 +104,58 @@ func TestDtlsAuthHAR(t *testing.T) {
 			t.Errorf("%s: verifies with the wrong user id", what)
 		}
 	}
-	for _, e := range har.Log.Entries {
-		if !strings.Contains(e.Request.URL, RPSignalingPath) {
-			continue
+	for _, hm := range msgs {
+		msg := hm.Msg
+		if j := msg.Body.JoinRequest; j != nil {
+			if j.Offer != nil && j.Offer.SDP != "" {
+				check("JOIN offer", j.Offer.SDP, msg.Header.SenderID)
+				checkBundleKey(t, j, j.Offer.SDP)
+			}
+			if j.Answer != nil {
+				check("JOIN answer", j.Answer.SDP, msg.Header.SenderID)
+			}
 		}
-		for _, m := range e.WebSocketMessages {
-			if m.Opcode != 2 {
-				continue
-			}
-			data, err := base64.StdEncoding.DecodeString(m.Data)
-			if err != nil {
-				continue
-			}
-			events, _ := DecodeWebsocketMessage(data, m.Type == "receive")
-			for _, ev := range events {
-				if _, ok := ev.Frame.(*dgw.DataFrame); !ok || ev.Err != nil || ev.Message == nil {
-					continue
-				}
-				msg := ev.Message
-				if j := msg.Body.JoinRequest; j != nil && j.Offer != nil {
-					check("caller offer (JOIN)", j.Offer.SDP, msg.Header.SenderID)
-				}
-				if s := msg.Body.ServerMediaUpdateRequest; s != nil && s.Answer != nil {
-					check("callee answer (SMU)", s.Answer.SDP, s.SDPOriginLocalID)
-				}
-			}
+		if s := msg.Body.ServerMediaUpdateRequest; s != nil && s.Answer != nil {
+			check("SMU answer", s.Answer.SDP, s.SDPOriginLocalID)
+		}
+		if r := msg.Body.RingRequest; r != nil && r.Offer != nil {
+			check("RING offer via "+hm.Transport, r.Offer.SDP, r.Caller)
 		}
 	}
-	if checked != 2 {
-		t.Fatalf("expected 2 signed SDPs, found %d", checked)
+	if checked == 0 {
+		t.Fatal("no signed SDPs found")
+	}
+	t.Logf("%d signed SDPs verified", checked)
+}
+
+// checkBundleKey compares the x-dtls-auth key of a JOIN's own SDP with the
+// identity key in the same JOIN's E2eeState pre-key bundle.
+func checkBundleKey(t *testing.T, j *JoinRequest, sdp string) {
+	if j.SyncPayload == nil {
+		return
+	}
+	st, ok := j.SyncPayload.StateStore.Get(TopicE2eeState)
+	if !ok {
+		return
+	}
+	cs, err := ParseE2eeClientState(st.Data)
+	if err != nil {
+		t.Errorf("E2eeClientState: %v", err)
+		return
+	}
+	bundle, err := ParsePreKeyBundle(cs.PreKeyBundle)
+	if err != nil {
+		t.Errorf("preKeyBundle: %v", err)
+		return
+	}
+	info, err := ParseDtlsAuthInfo(SDPDtlsAuth(sdp))
+	if err != nil {
+		t.Errorf("x-dtls-auth: %v", err)
+		return
+	}
+	if !bytes.Equal(info.PublicKey, bundle.IdentityKey) || info.DeviceID != cs.DeviceID {
+		t.Errorf("JOIN x-dtls-auth key/device does not match the E2eeState bundle")
+	} else {
+		t.Logf("JOIN x-dtls-auth key and device id match the E2eeState bundle")
 	}
 }

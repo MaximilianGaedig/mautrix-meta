@@ -27,11 +27,20 @@ import (
 	"go.mau.fi/mautrix-meta/pkg/messagix/dgw"
 )
 
-// TestDecodeHAR decodes every rpsignaling frame of a browser HAR capture.
-// It is skipped unless RTCSIGNAL_HAR points at a HAR file, and it only logs
-// message types and body members, never payload contents, so it is safe to
-// run against captures of real calls.
-func TestDecodeHAR(t *testing.T) {
+// harMessage is one multiway message found in a HAR capture.
+type harMessage struct {
+	Time       float64 // seconds since the socket's first message
+	Dir        string  // "send" or "receive"
+	Transport  string  // "dgw" (rpsignaling) or "mqtt" (/t_rtc_multi)
+	Msg        *Message
+	RawPayload []byte // the exact bytes the message was decoded from
+}
+
+// loadHARMessages decodes every rpsignaling data frame and every
+// /t_rtc_multi MQTT publish of the HAR named by RTCSIGNAL_HAR. It skips the
+// test if the variable is unset.
+func loadHARMessages(t *testing.T) []harMessage {
+	t.Helper()
 	path := os.Getenv("RTCSIGNAL_HAR")
 	if path == "" {
 		t.Skip("RTCSIGNAL_HAR not set")
@@ -58,9 +67,11 @@ func TestDecodeHAR(t *testing.T) {
 	if err = json.Unmarshal(raw, &har); err != nil {
 		t.Fatal(err)
 	}
-	var messages, reencoded, clientMsgs int
+	var out []harMessage
 	for _, e := range har.Log.Entries {
-		if !strings.Contains(e.Request.URL, RPSignalingPath) {
+		isDGW := strings.Contains(e.Request.URL, RPSignalingPath)
+		isMQTT := strings.Contains(e.Request.URL, "edge-chat.facebook.com/chat")
+		if !isDGW && !isMQTT {
 			continue
 		}
 		start := 0.0
@@ -76,6 +87,18 @@ func TestDecodeHAR(t *testing.T) {
 				t.Fatalf("message %d: %v", i, err)
 			}
 			fromServer := m.Type == "receive"
+			if isMQTT {
+				topic, payload, ok := parseMQTTPublish(data)
+				if !ok || topic != MQTTTopic {
+					continue
+				}
+				_, msg, err := DecodeMQTTPayload(payload)
+				if err != nil {
+					t.Fatalf("mqtt message %d: %v", i, err)
+				}
+				out = append(out, harMessage{m.Time - start, m.Type, "mqtt", msg, payload})
+				continue
+			}
 			events, err := DecodeWebsocketMessage(data, fromServer)
 			if err != nil {
 				t.Fatalf("message %d: %v", i, err)
@@ -88,25 +111,77 @@ func TestDecodeHAR(t *testing.T) {
 				if ev.Err != nil {
 					t.Fatalf("message %d: %v", i, ev.Err)
 				}
-				messages++
-				msg := ev.Message
-				t.Logf("%7.3f %-7s %-19s resp=%-5t body=%s", m.Time-start, m.Type, msg.Header.Type, msg.Header.IsResponse(), msg.Body.Name())
-				if !fromServer {
-					clientMsgs++
-					enc, err := EncodePayload(msg)
-					if err != nil {
-						t.Errorf("message %d: re-encode: %v", i, err)
-					} else if bytes.Equal(enc, df.Payload) {
-						reencoded++
-					} else {
-						t.Logf("message %d (%s/%s) re-encodes differently", i, msg.Header.Type, msg.Body.Name())
-					}
-				}
+				out = append(out, harMessage{m.Time - start, m.Type, "dgw", ev.Message, df.Payload})
 			}
 		}
 	}
-	if messages == 0 {
+	return out
+}
+
+// parseMQTTPublish extracts topic and payload from an MQTT 3.1 PUBLISH.
+func parseMQTTPublish(b []byte) (topic string, payload []byte, ok bool) {
+	if len(b) < 2 || b[0]>>4 != 3 {
+		return "", nil, false
+	}
+	qos := (b[0] >> 1) & 3
+	p, length, mul := 1, 0, 1
+	for {
+		if p >= len(b) {
+			return "", nil, false
+		}
+		c := b[p]
+		p++
+		length += int(c&0x7f) * mul
+		mul *= 128
+		if c < 0x80 {
+			break
+		}
+	}
+	if p+length != len(b) || p+2 > len(b) {
+		return "", nil, false
+	}
+	tl := int(b[p])<<8 | int(b[p+1])
+	p += 2
+	if p+tl > len(b) {
+		return "", nil, false
+	}
+	topic = string(b[p : p+tl])
+	p += tl
+	if qos > 0 {
+		p += 2
+	}
+	if p > len(b) {
+		return "", nil, false
+	}
+	return topic, b[p:], true
+}
+
+// TestDecodeHAR decodes every rpsignaling frame and /t_rtc_multi publish of
+// a browser HAR capture and requires every client message to re-encode
+// byte for byte. It is skipped unless RTCSIGNAL_HAR points at a HAR file,
+// and it only logs message types and body members, never payload contents,
+// so it is safe to run against captures of real calls.
+func TestDecodeHAR(t *testing.T) {
+	msgs := loadHARMessages(t)
+	var reencoded, clientMsgs int
+	for i, hm := range msgs {
+		msg := hm.Msg
+		t.Logf("%7.3f %-4s %-7s %-19s resp=%-5t body=%s", hm.Time, hm.Transport, hm.Dir, msg.Header.Type, msg.Header.IsResponse(), msg.Body.Name())
+		if hm.Dir != "send" || hm.Transport != "dgw" {
+			continue
+		}
+		clientMsgs++
+		enc, err := EncodePayload(msg)
+		if err != nil {
+			t.Errorf("message %d: re-encode: %v", i, err)
+		} else if bytes.Equal(enc, hm.RawPayload) {
+			reencoded++
+		} else {
+			t.Errorf("message %d (%s/%s) re-encodes differently", i, msg.Header.Type, msg.Body.Name())
+		}
+	}
+	if len(msgs) == 0 {
 		t.Fatal("no rpsignaling messages found")
 	}
-	t.Logf("%d messages decoded, %d/%d client messages re-encode byte-exactly", messages, reencoded, clientMsgs)
+	t.Logf("%d messages decoded, %d/%d client messages re-encode byte-exactly", len(msgs), reencoded, clientMsgs)
 }

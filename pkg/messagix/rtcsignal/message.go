@@ -290,6 +290,7 @@ type Body struct {
 	ConferenceStateResponse   *ConferenceStateResponse   // 12
 	SubscriptionRequest       *SubscriptionRequest       // 14
 	DataMessageRequest        *DataMessageRequest        // 17
+	DataMessageResponse       *DataMessageResponse       // 19
 	UpdateRequest             *StateSyncMessage          // 30
 	UpdateResponse            *StateSyncMessage          // 31
 	NotifyRequest             *StateSyncMessage          // 32
@@ -381,6 +382,9 @@ func (b *Body) decode(r *reader) error {
 		case 17:
 			b.DataMessageRequest = &DataMessageRequest{}
 			err = b.DataMessageRequest.decode(sub)
+		case 19:
+			b.DataMessageResponse = &DataMessageResponse{}
+			err = b.DataMessageResponse.decode(sub)
 		case 30, 31, 32, 33:
 			m := &StateSyncMessage{}
 			err = m.decode(sub, id)
@@ -448,6 +452,8 @@ func (b *Body) member() (int16, bodyEncoder) {
 		return 14, b.SubscriptionRequest
 	case b.DataMessageRequest != nil:
 		return 17, b.DataMessageRequest
+	case b.DataMessageResponse != nil:
+		return 19, b.DataMessageResponse
 	case b.UpdateRequest != nil:
 		return 30, stateSyncEncoder{b.UpdateRequest, 30}
 	case b.UpdateResponse != nil:

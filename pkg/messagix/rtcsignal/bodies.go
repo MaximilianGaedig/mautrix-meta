@@ -18,6 +18,7 @@ package rtcsignal
 
 import (
 	"maps"
+	"net"
 	"slices"
 )
 
@@ -128,12 +129,20 @@ type DataMessage struct {
 	Sender             string   // header.1
 	TopicDeprecated    string   // header.2
 	Recipients         []string // header.3
+	ServiceSender      int32    // header.4
+	ServiceRecipients  []int32  // header.5 (set<i32>)
 	ShouldSendToAll    bool     // header.6
 	SenderE2eeID       string   // header.7
 	Topic              string   // body.genericMessage.1
 	Data               []byte   // body.genericMessage.2
 	E2eEncryptedData   []byte   // body.genericMessage.3
 	HasOtherBodyMember bool     // body had a non-generic member (not modelled)
+
+	// hasServiceSender/hasServiceRecipients record wire presence of header
+	// fields 4 and 5 (the web client sends an empty set 5 on E2eeKey
+	// messages), so a decoded message re-encodes byte for byte.
+	hasServiceSender     bool
+	hasServiceRecipients bool
 }
 
 func (d *DataMessage) decode(r *reader) error {
@@ -148,6 +157,12 @@ func (d *DataMessage) decode(r *reader) error {
 					d.TopicDeprecated, err = r.string()
 				case id == 3 && (t == TypeSet || t == TypeList):
 					d.Recipients, err = r.stringList()
+				case id == 4 && t == TypeI32:
+					d.hasServiceSender = true
+					d.ServiceSender, err = r.i32()
+				case id == 5 && (t == TypeSet || t == TypeList):
+					d.hasServiceRecipients = true
+					d.ServiceRecipients, err = r.i32List()
 				case id == 6 && (t == TypeTrue || t == TypeFalse):
 					d.ShouldSendToAll = t == TypeTrue
 				case id == 7 && t == TypeBinary:
@@ -190,6 +205,12 @@ func (d *DataMessage) encode(w *writer) {
 		}
 		if len(d.Recipients) > 0 {
 			w.fieldStringList(3, TypeSet, d.Recipients)
+		}
+		if d.hasServiceSender || d.ServiceSender != 0 {
+			w.fieldI32(4, d.ServiceSender)
+		}
+		if d.hasServiceRecipients || len(d.ServiceRecipients) > 0 {
+			w.fieldI32List(5, TypeSet, d.ServiceRecipients)
 		}
 		if d.ShouldSendToAll {
 			w.fieldBool(6, true)
@@ -241,6 +262,17 @@ type TrackInfo struct {
 	Name                   string // 7
 	CustomAudioContentType int32  // 8
 	NodeID                 int64  // 9
+
+	// present is a bitmask (1<<id) of the fields that were on the wire, so
+	// a decoded status re-encodes exactly; zero for a freshly built one.
+	present uint16
+}
+
+func (ti *TrackInfo) has(id int16, nonzero bool) bool {
+	if ti.present != 0 {
+		return ti.present&(1<<id) != 0
+	}
+	return nonzero
 }
 
 func decodeMediaStatus(r *reader) (map[string]TrackInfo, error) {
@@ -255,6 +287,9 @@ func decodeMediaStatus(r *reader) (map[string]TrackInfo, error) {
 			}
 			var ti TrackInfo
 			err := r.readStruct(func(id int16, t Type) (err error) {
+				if id > 0 && id < 16 {
+					ti.present |= 1 << id
+				}
 				switch {
 				case id == 1 && (t == TypeTrue || t == TypeFalse):
 					ti.Enabled = t == TypeTrue
@@ -294,17 +329,31 @@ func (w *writer) mediaStatus(id int16, tracks map[string]TrackInfo) {
 			ti := tracks[k]
 			w.binaryValue([]byte(k))
 			w.structBegin()
-			w.fieldBool(1, ti.Enabled)
-			if ti.PausedUplink != 0 || ti.Owner != "" {
+			if ti.has(1, true) {
+				w.fieldBool(1, ti.Enabled)
+			}
+			if ti.has(2, ti.PausedUplink != 0 || ti.Owner != "") {
 				w.fieldI32(2, ti.PausedUplink)
+			}
+			if ti.has(3, ti.PausedUplink != 0 || ti.Owner != "") {
 				w.fieldI32(3, ti.PausedDownlink)
 			}
-			w.optString(4, ti.Owner)
-			w.fieldI32(5, ti.Label)
-			w.fieldI32(6, ti.CustomVideoContentType)
-			w.optString(7, ti.Name)
-			w.fieldI32(8, ti.CustomAudioContentType)
-			if ti.NodeID != 0 {
+			if ti.has(4, ti.Owner != "") {
+				w.fieldString(4, ti.Owner)
+			}
+			if ti.has(5, true) {
+				w.fieldI32(5, ti.Label)
+			}
+			if ti.has(6, true) {
+				w.fieldI32(6, ti.CustomVideoContentType)
+			}
+			if ti.has(7, ti.Name != "") {
+				w.fieldString(7, ti.Name)
+			}
+			if ti.has(8, true) {
+				w.fieldI32(8, ti.CustomAudioContentType)
+			}
+			if ti.has(9, ti.NodeID != 0) {
 				w.fieldI64(9, ti.NodeID)
 			}
 			w.structEnd()
@@ -446,11 +495,26 @@ func (w *writer) enforcement(id int16, e *E2eeEnforcement) {
 	})
 }
 
-// TurnInfo is one TURN relay offered via RelayInfo.
+// TurnInfo is one TURN relay offered via RelayInfo. ipv4/ipv6 are Thrift
+// strings holding the raw 4/16 address bytes (observed in a RingRequest);
+// they are converted to text here. Observed ports: udp 40003, sslTcp 8080,
+// tls 443, matching /videocall/turndiscovery/.
 type TurnInfo struct {
-	IPv4, IPv6                 string
-	UDPPort, TCPPort, TLSPort  int32
-	TurnUsername, TurnPassword string
+	IPv4, IPv6                 string // 1, 2
+	UDPPort                    int32  // 3
+	TCPPort                    int32  // 4
+	SSLTCPPort                 int32  // 5
+	TLSPort                    int32  // 7
+	TurnUsername, TurnPassword string // 9, 10 (per-relay credentials, if any)
+}
+
+// addrString converts a raw 4- or 16-byte address to text; anything else is
+// taken to already be text.
+func addrString(b []byte) string {
+	if len(b) == net.IPv4len || len(b) == net.IPv6len {
+		return net.IP(b).String()
+	}
+	return string(b)
 }
 
 // RelayInfo is the TURN allocation the server may push in JoinResponse,
@@ -473,13 +537,19 @@ func decodeRelayInfo(r *reader) (*RelayInfo, error) {
 				err := r.readStruct(func(id int16, t Type) (err error) {
 					switch {
 					case id == 1 && t == TypeBinary:
-						ti.IPv4, err = r.string()
+						var b []byte
+						b, err = r.binary()
+						ti.IPv4 = addrString(b)
 					case id == 2 && t == TypeBinary:
-						ti.IPv6, err = r.string()
+						var b []byte
+						b, err = r.binary()
+						ti.IPv6 = addrString(b)
 					case id == 3 && t == TypeI32:
 						ti.UDPPort, err = r.i32()
 					case id == 4 && t == TypeI32:
 						ti.TCPPort, err = r.i32()
+					case id == 5 && t == TypeI32:
+						ti.SSLTCPPort, err = r.i32()
 					case id == 7 && t == TypeI32:
 						ti.TLSPort, err = r.i32()
 					case id == 9 && t == TypeBinary:
@@ -779,8 +849,9 @@ func (m *ServerMediaUpdateRequest) RemoteSDP() (sdpType string, sd *SessionDescr
 // ServerMediaUpdateResponse (body member 4) acknowledges an update with the
 // version the client is now at.
 type ServerMediaUpdateResponse struct {
-	CurrentVersion int64               // 1
-	Answer         *SessionDescription // 2
+	CurrentVersion int64                // 1
+	Answer         *SessionDescription  // 2
+	MediaStatus    map[string]TrackInfo // 3 (the client's own tracks)
 }
 
 func (m *ServerMediaUpdateResponse) decode(r *reader) error {
@@ -790,6 +861,8 @@ func (m *ServerMediaUpdateResponse) decode(r *reader) error {
 			m.CurrentVersion, err = r.i64()
 		case id == 2 && t == TypeStruct:
 			m.Answer, err = decodeSD(r)
+		case id == 3 && t == TypeStruct:
+			m.MediaStatus, err = decodeMediaStatus(r)
 		default:
 			err = r.skip(t)
 		}
@@ -800,6 +873,9 @@ func (m *ServerMediaUpdateResponse) decode(r *reader) error {
 func (m *ServerMediaUpdateResponse) encode(w *writer) {
 	w.fieldI64(1, m.CurrentVersion)
 	w.optSD(2, m.Answer)
+	if m.MediaStatus != nil {
+		w.mediaStatus(3, m.MediaStatus)
+	}
 }
 
 // HangupRequest (body member 5) leaves the call.
@@ -833,25 +909,26 @@ func (m *HangupRequest) encode(w *writer) {
 // receives (on the parent window's rpsignaling stream or the /t_rtc_multi
 // MQTT topic). For P2P calls the caller's SDP offer is inside.
 type RingRequest struct {
-	Caller                string              // 1
-	OtherParticipants     []string            // 2
-	RingType              RingType            // 4
-	OfferedExperiments    string              // 5
-	IsScheduledCall       bool                // 6
-	AppMessages           []DataMessage       // 8
-	Offer                 *SessionDescription // 10
-	IsPreconnectSupported bool                // 12
-	SDPOriginLocalID      string              // 13
-	UnifiedOffer          *SessionDescription // 14
-	MediaPath             MediaPath           // 15
-	E2eeEnforcement       *E2eeEnforcement    // 16
-	IsLegacyCall          bool                // 17
-	IsTransferCall        bool                // 18
-	RelayInfo             *RelayInfo          // 20
-	CallerClientSessionID string              // 23
-	ThreadGroupID         string              // 24.1
-	ThreadPeerID          string              // 24.2
-	LinkURL               string              // 25
+	Caller                string               // 1
+	OtherParticipants     []string             // 2
+	RingType              RingType             // 4
+	OfferedExperiments    string               // 5
+	IsScheduledCall       bool                 // 6
+	AppMessages           []DataMessage        // 8
+	Offer                 *SessionDescription  // 10
+	MediaStatusEx         map[string]TrackInfo // 11 (the caller's tracks)
+	IsPreconnectSupported bool                 // 12
+	SDPOriginLocalID      string               // 13
+	UnifiedOffer          *SessionDescription  // 14
+	MediaPath             MediaPath            // 15
+	E2eeEnforcement       *E2eeEnforcement     // 16
+	IsLegacyCall          bool                 // 17
+	IsTransferCall        bool                 // 18
+	RelayInfo             *RelayInfo           // 20
+	CallerClientSessionID string               // 23
+	ThreadGroupID         string               // 24.1
+	ThreadPeerID          string               // 24.2
+	LinkURL               string               // 25
 }
 
 func (m *RingRequest) decode(r *reader) error {
@@ -874,6 +951,8 @@ func (m *RingRequest) decode(r *reader) error {
 			m.AppMessages, err = decodeDataMessages(r)
 		case id == 10 && t == TypeStruct:
 			m.Offer, err = decodeSD(r)
+		case id == 11 && t == TypeStruct:
+			m.MediaStatusEx, err = decodeMediaStatus(r)
 		case id == 12 && isBool:
 			m.IsPreconnectSupported = t == TypeTrue
 		case id == 13 && t == TypeBinary:
@@ -1273,6 +1352,9 @@ func (m *RingRequest) encode(w *writer) {
 		w.dataMessages(8, m.AppMessages)
 	}
 	w.optSD(10, m.Offer)
+	if m.MediaStatusEx != nil {
+		w.mediaStatus(11, m.MediaStatusEx)
+	}
 	w.fieldBool(12, m.IsPreconnectSupported)
 	w.optString(13, m.SDPOriginLocalID)
 	w.optSD(14, m.UnifiedOffer)
@@ -1282,6 +1364,9 @@ func (m *RingRequest) encode(w *writer) {
 	}
 	w.fieldBool(17, m.IsLegacyCall)
 	w.fieldBool(18, m.IsTransferCall)
+	if m.RelayInfo != nil {
+		w.fieldStruct(20, func() { m.RelayInfo.encode(w) })
+	}
 	w.optString(23, m.CallerClientSessionID)
 	if m.ThreadGroupID != "" || m.ThreadPeerID != "" {
 		w.fieldStruct(24, func() {
@@ -1323,4 +1408,92 @@ func (m *DataMessageRequest) encode(w *writer) {
 func (m *ConnectMessage) encode(w *writer) {
 	w.optSD(1, m.SDP)
 	w.optString(2, m.SDPOriginLocalID)
+}
+
+// DataMessageResponse (body member 19) acknowledges a DATA_MESSAGE. The
+// server fills deliveryResult with per-recipient status codes; clients send
+// an empty map.
+type DataMessageResponse struct {
+	DeliveryResult map[string]int32 // 1
+	hasServiceMap  bool             // 2 (serviceTypeDeliveryResult, not modelled)
+}
+
+func (m *DataMessageResponse) decode(r *reader) error {
+	return r.readStruct(func(id int16, t Type) (err error) {
+		switch {
+		case id == 1 && t == TypeMap:
+			m.DeliveryResult = map[string]int32{}
+			err = r.stringMap(func(k string, vt Type) error {
+				if vt != TypeI32 {
+					return r.skip(vt)
+				}
+				v, err := r.i32()
+				m.DeliveryResult[k] = v
+				return err
+			})
+		case id == 2 && t == TypeMap:
+			m.hasServiceMap = true
+			err = r.skip(t)
+		default:
+			err = r.skip(t)
+		}
+		return
+	})
+}
+
+func (m *DataMessageResponse) encode(w *writer) {
+	w.fieldHeader(1, TypeMap)
+	if len(m.DeliveryResult) == 0 {
+		w.mapHeader(0, 0, 0)
+	} else {
+		w.mapHeader(TypeBinary, TypeI32, len(m.DeliveryResult))
+		for _, k := range slices.Sorted(maps.Keys(m.DeliveryResult)) {
+			w.binaryValue([]byte(k))
+			w.zigzag(int64(m.DeliveryResult[k]))
+		}
+	}
+	if m.hasServiceMap {
+		w.fieldHeader(2, TypeMap)
+		w.mapHeader(0, 0, 0)
+	}
+}
+
+func (ri *RelayInfo) encode(w *writer) {
+	w.fieldHeader(1, TypeList)
+	w.listHeader(TypeStruct, len(ri.Turns))
+	for _, t := range ri.Turns {
+		w.structBegin()
+		w.fieldBinary(1, addrBytes(t.IPv4, net.IPv4len))
+		if t.IPv6 != "" {
+			w.fieldBinary(2, addrBytes(t.IPv6, net.IPv6len))
+		}
+		w.fieldI32(3, t.UDPPort)
+		if t.TCPPort != 0 {
+			w.fieldI32(4, t.TCPPort)
+		}
+		if t.SSLTCPPort != 0 {
+			w.fieldI32(5, t.SSLTCPPort)
+		}
+		if t.TLSPort != 0 {
+			w.fieldI32(7, t.TLSPort)
+		}
+		w.optString(9, t.TurnUsername)
+		w.optString(10, t.TurnPassword)
+		w.structEnd()
+	}
+	w.optString(3, ri.TurnUsername)
+	w.optString(4, ri.TurnPassword)
+}
+
+func addrBytes(s string, n int) []byte {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return []byte(s)
+	}
+	if n == net.IPv4len {
+		if v4 := ip.To4(); v4 != nil {
+			return v4
+		}
+	}
+	return ip.To16()
 }
