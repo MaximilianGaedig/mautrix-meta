@@ -18,9 +18,13 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/callsignal"
@@ -108,5 +112,35 @@ func TestAbandonedAttemptStopsMatching(t *testing.T) {
 	s.abandonMessengerAttempt()
 	if s.matches(other2("ROOM:1")) || s.joined || s.metaLeg != nil {
 		t.Fatal("abandoned attempt still matches or looks joined")
+	}
+}
+
+func TestCallEventContentVersionIsString(t *testing.T) {
+	c := callEventContent(&event.CallHangupEventContent{
+		BaseCallEventContent: event.BaseCallEventContent{CallID: "c", PartyID: "p", Version: "1"},
+		Reason:               event.CallHangupUserHangup,
+	})
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"version":"1"`) || !strings.Contains(string(data), `"call_id":"c"`) {
+		t.Fatalf("unexpected content: %s", data)
+	}
+}
+
+func TestRecentlyBridgedSuppressesNotices(t *testing.T) {
+	cb := &callBridge{log: zerolog.Nop()}
+	a := networkid.PortalKey{ID: "a"}
+	if cb.recentlyBridged(a) {
+		t.Fatal("unbridged portal reported as bridged")
+	}
+	cb.markBridged(a)
+	if !cb.recentlyBridged(a) || cb.recentlyBridged(networkid.PortalKey{ID: "b"}) {
+		t.Fatal("bridged portal tracking wrong")
+	}
+	cb.bridged[a] = time.Now().Add(-bridgedNoticeWindow - time.Second)
+	if cb.recentlyBridged(a) {
+		t.Fatal("notice suppression should expire")
 	}
 }

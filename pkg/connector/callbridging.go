@@ -141,6 +141,39 @@ type callBridge struct {
 
 	lock   sync.Mutex
 	active *callSession
+	// bridged is when each portal last had a bridged call (set at start and
+	// end), so Messenger's call notifications for it don't also become
+	// "answer on Messenger" / "missed call" text notices.
+	bridged map[networkid.PortalKey]time.Time
+}
+
+// bridgedNoticeWindow is how long after a bridged call its notices are
+// suppressed (fb:call notifications arrive a few seconds late).
+const bridgedNoticeWindow = 2 * time.Minute
+
+func (cb *callBridge) markBridged(key networkid.PortalKey) {
+	cb.lock.Lock()
+	defer cb.lock.Unlock()
+	if cb.bridged == nil {
+		cb.bridged = map[networkid.PortalKey]time.Time{}
+	}
+	cb.bridged[key] = time.Now()
+	for k, t := range cb.bridged {
+		if time.Since(t) > bridgedNoticeWindow {
+			delete(cb.bridged, k)
+		}
+	}
+}
+
+// recentlyBridged reports whether key has, or just had, a bridged call.
+func (cb *callBridge) recentlyBridged(key networkid.PortalKey) bool {
+	cb.lock.Lock()
+	defer cb.lock.Unlock()
+	if cb.active != nil && cb.active.portal != nil && cb.active.portal.PortalKey == key {
+		return true
+	}
+	t, ok := cb.bridged[key]
+	return ok && time.Since(t) <= bridgedNoticeWindow
 }
 
 func (m *MetaClient) callBridgingEnabled() bool {
@@ -672,6 +705,7 @@ func (cb *callBridge) newSession(ctx context.Context, portal *bridgev2.Portal, p
 	if err != nil || ghost == nil {
 		return nil, fmt.Errorf("failed to get ghost: %w", err)
 	}
+	cb.markBridged(portal.PortalKey)
 	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &callSession{
 		cb:        cb,
@@ -823,15 +857,30 @@ func (s *callSession) ringMatrix() error {
 		return err
 	}
 	sdp := s.matrixSnapshot(leg)
-	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallInvite, &event.Content{Parsed: &event.CallInviteEventContent{
+	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallInvite, callEventContent(&event.CallInviteEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		Lifetime:             int(callInviteLifetime / time.Millisecond),
 		Offer:                event.CallData{SDP: sdp, Type: event.CallDataTypeOffer},
-	}}, nil)
+	}), nil)
 	if err == nil {
 		s.log.Info().Msg("Sent m.call.invite")
 	}
 	return err
+}
+
+// callEventContent serialises a call event with `version` as the string
+// "1". mautrix-go writes an all-digit CallVersion as a JSON number, but the
+// spec only allows the number for version 0, and strict clients (Ruma, so
+// Element X) reject a numeric 1 ("invalid VoIP version ID").
+func callEventContent(parsed any) *event.Content {
+	raw := map[string]any{}
+	if data, err := json.Marshal(parsed); err == nil {
+		_ = json.Unmarshal(data, &raw)
+	}
+	if v, ok := raw["version"]; ok && fmt.Sprint(v) != "0" {
+		raw["version"] = fmt.Sprint(v)
+	}
+	return &event.Content{Raw: raw}
 }
 
 func (s *callSession) baseCallContent() event.BaseCallEventContent {
@@ -892,10 +941,10 @@ func (s *callSession) flushMatrixCandidates() {
 	if len(cands) == 0 || s.ctx.Err() != nil {
 		return
 	}
-	_, err := s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallCandidates, &event.Content{Parsed: &event.CallCandidatesEventContent{
+	_, err := s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallCandidates, callEventContent(&event.CallCandidatesEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		Candidates:           cands,
-	}}, nil)
+	}), nil)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("Failed to send m.call.candidates")
 	}
@@ -1179,10 +1228,10 @@ func (s *callSession) answerMatrixOutgoing() {
 	if sdp == "" {
 		return
 	}
-	_, err := s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallAnswer, &event.Content{Parsed: &event.CallAnswerEventContent{
+	_, err := s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallAnswer, callEventContent(&event.CallAnswerEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		Answer:               event.CallData{SDP: sdp, Type: event.CallDataTypeAnswer},
-	}}, nil)
+	}), nil)
 	if err != nil {
 		s.log.Err(err).Msg("Failed to send m.call.answer")
 		s.end(endFailed, "")
@@ -1329,10 +1378,10 @@ func (cb *callBridge) rejectBusy(ctx context.Context, portal *bridgev2.Portal, p
 	if err != nil || ghost == nil {
 		return
 	}
-	_, _ = ghost.Intent.SendMessage(ctx, portal.MXID, event.CallHangup, &event.Content{Parsed: &event.CallHangupEventContent{
+	_, _ = ghost.Intent.SendMessage(ctx, portal.MXID, event.CallHangup, callEventContent(&event.CallHangupEventContent{
 		BaseCallEventContent: event.BaseCallEventContent{CallID: inv.CallID, PartyID: "bridge-busy", Version: "1"},
 		Reason:               "user_busy",
-	}}, nil)
+	}), nil)
 }
 
 // --- Matrix events ---
@@ -1443,11 +1492,11 @@ func (s *callSession) onMatrixNegotiate(neg *event.CallNegotiateEventContent) {
 		Bool("element_sends_video", callbridge.SendsVideo(neg.Description.SDP)).
 		Bool("bridge_has_video", s.videoCodec != "").
 		Msg("Answering Element's renegotiation")
-	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallNegotiate, &event.Content{Parsed: &event.CallNegotiateEventContent{
+	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallNegotiate, callEventContent(&event.CallNegotiateEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		Lifetime:             int(callInviteLifetime / time.Millisecond),
 		Description:          event.CallData{SDP: answer, Type: event.CallDataTypeAnswer},
-	}}, nil)
+	}), nil)
 	if err != nil {
 		s.log.Err(err).Msg("Failed to send m.call.negotiate answer")
 	}
@@ -1472,10 +1521,10 @@ func (s *callSession) onMatrixAnswer(ans *event.CallAnswerEventContent) {
 		s.end(endFailed, "")
 		return
 	}
-	_, err := s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallSelectAnswer, &event.Content{Parsed: &event.CallSelectAnswerEventContent{
+	_, err := s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallSelectAnswer, callEventContent(&event.CallSelectAnswerEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		SelectedPartyID:      ans.PartyID,
-	}}, nil)
+	}), nil)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("Failed to send m.call.select_answer")
 	}
@@ -1531,10 +1580,10 @@ func (s *callSession) end(reason endReason, detail string) {
 				}
 				detail = ""
 			}
-			_, err := s.ghost.SendMessage(sendCtx, s.portal.MXID, event.CallHangup, &event.Content{Parsed: &event.CallHangupEventContent{
+			_, err := s.ghost.SendMessage(sendCtx, s.portal.MXID, event.CallHangup, callEventContent(&event.CallHangupEventContent{
 				BaseCallEventContent: s.baseCallContent(),
 				Reason:               mxReason,
-			}}, nil)
+			}), nil)
 			if err != nil {
 				s.log.Warn().Err(err).Msg("Failed to send m.call.hangup")
 			} else {
@@ -1555,5 +1604,6 @@ func (s *callSession) end(reason endReason, detail string) {
 			s.cb.active = nil
 		}
 		s.cb.lock.Unlock()
+		s.cb.markBridged(s.portal.PortalKey)
 	})
 }

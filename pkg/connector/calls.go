@@ -507,6 +507,10 @@ func (m *MetaClient) queueCallNotice(n *callNotice) {
 	if n == nil {
 		return
 	}
+	if cb := m.callBridge.Load(); cb != nil && cb.recentlyBridged(n.Portal) {
+		// The call itself is bridged (m.call.*); Matrix clients show it.
+		return
+	}
 	sender := bridgev2.EventSender{}
 	if n.Sender != 0 {
 		sender = m.makeEventSender(n.Sender)
