@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 
 	"github.com/google/go-querystring/query"
@@ -131,4 +132,71 @@ func (c *Client) FetchTURNServer(ctx context.Context) (*TURNServer, error) {
 		return nil, fmt.Errorf("turndiscovery returned no payload (error %s)", strconv.Itoa(resp.Error))
 	}
 	return resp.Payload, nil
+}
+
+// FrameEncryptionResourceID is the static-resource id the web client's FrameEncryptionWasm resolves
+// its WebAssembly module with (bx("37")); the group-call page maps it to a URL in its bxData.
+const FrameEncryptionResourceID = "37"
+
+// FetchFrameEncryptionModuleURL loads a thread's group-call page, as the browser does when a call
+// window opens, and returns the frame-encryption module's URL from the page's bxData.
+func (c *Client) FetchFrameEncryptionModuleURL(ctx context.Context, threadID string) (string, error) {
+	if c == nil {
+		return "", ErrClientIsNil
+	}
+	page := c.GetEndpoint("base_url") + "/groupcall/ROOM:" + threadID + "/?is_e2ee_mandated=true&thread_type=15"
+	headers := c.http.BuildHeaders(true, true)
+	_, body, err := c.http.MakeRequest(ctx, page, "GET", headers, nil, types.NONE)
+	if err != nil {
+		return "", fmt.Errorf("group call page request failed: %w", err)
+	}
+	u := BXDataURI(body, FrameEncryptionResourceID)
+	if u == "" {
+		return "", fmt.Errorf("group call page (%d bytes) has no bxData entry %s", len(body), FrameEncryptionResourceID)
+	}
+	return u, nil
+}
+
+// BXDataURI returns the URI a page's "bxData" static-resource map gives id, or "" if it has none.
+func BXDataURI(page []byte, id string) string {
+	key := []byte(`"` + id + `":{"uri":`)
+	for rest := page; ; {
+		i := bytes.Index(rest, []byte(`"bxData":{`))
+		if i < 0 {
+			return ""
+		}
+		rest = rest[i:]
+		end := bytes.Index(rest, []byte("}}"))
+		if end < 0 {
+			return ""
+		}
+		if j := bytes.Index(rest[:end+2], key); j >= 0 {
+			var uri string
+			if json.NewDecoder(bytes.NewReader(rest[j+len(key):])).Decode(&uri) == nil {
+				return uri
+			}
+		}
+		rest = rest[end:]
+	}
+}
+
+// FetchStaticResource downloads a static.xx.fbcdn.net resource the way the web client fetches its
+// WebAssembly modules: a plain GET without cookies.
+func (c *Client) FetchStaticResource(ctx context.Context, url string) ([]byte, error) {
+	if c == nil {
+		return nil, ErrClientIsNil
+	}
+	headers := http.Header{}
+	headers.Set("accept", "*/*")
+	headers.Set("user-agent", useragent.UserAgent)
+	headers.Set("origin", "https://www.facebook.com")
+	headers.Set("referer", "https://www.facebook.com/")
+	headers.Set("sec-fetch-dest", "empty")
+	headers.Set("sec-fetch-mode", "cors")
+	headers.Set("sec-fetch-site", "cross-site")
+	_, body, err := c.http.MakeRequest(ctx, url, "GET", headers, nil, types.NONE)
+	if err != nil {
+		return nil, fmt.Errorf("static resource request failed: %w", err)
+	}
+	return body, nil
 }
