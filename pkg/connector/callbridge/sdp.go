@@ -246,8 +246,12 @@ func IsPlanB(sdp string) bool {
 				return true
 			}
 			tracks = map[string]bool{}
-		case line == "a=mid:audio" || line == "a=mid:video":
-			return true
+		case strings.HasPrefix(line, "a=mid:"):
+			// Pion's own test (descriptionIsPlanB): any mid named audio, video or data, in any case.
+			switch strings.ToLower(strings.TrimSpace(line[len("a=mid:"):])) {
+			case "audio", "video", "data":
+				return true
+			}
 		case strings.HasPrefix(line, "a=msid:"):
 			if f := strings.Fields(line[len("a=msid:"):]); len(f) == 2 {
 				tracks[f[1]] = true

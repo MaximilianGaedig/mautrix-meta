@@ -318,6 +318,7 @@ type callSession struct {
 	rtcJoined      bool
 	rtcRing        id.EventID
 	rtcUserPresent bool
+	rtcVideoIntent bool // ring as a video call
 
 	endOnce sync.Once
 }
@@ -826,6 +827,8 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 	if ring.RingType == rtcsignal.RingPeerVideo || callbridge.SendsVideo(offerSDP) {
 		s.videoCodec = callbridge.PickVideoCodec(offerSDP)
 	}
+	// Messenger offers video on audio calls too (for a later upgrade); the ring says what the call is.
+	s.rtcVideoIntent = ring.RingType == rtcsignal.RingPeerVideo
 	s.e2ee = ring.E2eeEnforcement == nil || ring.E2eeEnforcement.Mode == rtcsignal.E2eeMandated
 	s.lock.Unlock()
 	s.log.Info().

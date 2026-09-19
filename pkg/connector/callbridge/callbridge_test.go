@@ -513,6 +513,17 @@ func TestIsPlanB(t *testing.T) {
 	if !IsPlanB("m=audio 9 X 111\r\na=mid:audio\r\n") {
 		t.Fatal("Plan B mid names not detected")
 	}
+	// What Pion itself calls Plan B (descriptionIsPlanB): any mid named audio/video/data, any case.
+	// Messenger's mobile offers slipped past an audio/video-only check through their data channel.
+	for _, sdp := range []string{
+		"m=audio 9 X 111\r\na=mid:0\r\nm=application 9 X webrtc-datachannel\r\na=mid:data\r\n",
+		"m=audio 9 X 111\r\na=mid:Audio\r\n",
+		"m=video 9 X 96\r\na=mid:VIDEO \r\n",
+	} {
+		if !IsPlanB(sdp) {
+			t.Fatalf("Plan B not detected in %q", sdp)
+		}
+	}
 	twoTracks := "m=audio 9 X 111\r\na=mid:0\r\na=ssrc:1 msid:s a\r\na=ssrc:2 msid:s b\r\n"
 	if !IsPlanB(twoTracks) {
 		t.Fatal("two tracks in one section not detected")

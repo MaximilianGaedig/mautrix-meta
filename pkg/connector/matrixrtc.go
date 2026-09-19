@@ -254,7 +254,7 @@ func (s *callSession) sendRTCMembership(ctx context.Context) error {
 		return err
 	}
 	s.lock.Lock()
-	focus, created, video := s.rtcFocus, s.rtcCreatedTS, s.videoCodec != ""
+	focus, created, video := s.rtcFocus, s.rtcCreatedTS, s.rtcVideoIntent
 	s.lock.Unlock()
 	if focus == nil {
 		return errors.New("no focus")
@@ -315,7 +315,7 @@ func (s *callSession) ringRTC() error {
 		return err
 	}
 	s.lock.Lock()
-	memberEvent, video := s.rtcMemberEvent, s.videoCodec != ""
+	memberEvent, video := s.rtcMemberEvent, s.rtcVideoIntent
 	s.lock.Unlock()
 	intent := "audio"
 	if video {
@@ -493,6 +493,7 @@ func (cb *callBridge) startOutgoingRTC(ctx context.Context, portal *bridgev2.Por
 	if video {
 		s.videoCodec = webrtc.MimeTypeVP8
 	}
+	s.rtcVideoIntent = video
 	s.lock.Unlock()
 	s.log.Info().Bool("video", video).Msg("Outgoing MatrixRTC call from Matrix")
 	id := s.m.callIdentity()
