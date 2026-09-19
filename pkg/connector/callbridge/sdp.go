@@ -19,6 +19,7 @@ package callbridge
 import (
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/pion/webrtc/v4"
@@ -278,4 +279,155 @@ func IsPlanB(sdp string) bool {
 		}
 	}
 	return check()
+}
+
+// MIDs lists the a=mid of each media section in order ("" for a section without one).
+func MIDs(sdp string) []string {
+	var mids []string
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "m="):
+			mids = append(mids, "")
+		case strings.HasPrefix(line, "a=mid:") && len(mids) > 0:
+			mids[len(mids)-1] = strings.TrimSpace(line[len("a=mid:"):])
+		}
+	}
+	return mids
+}
+
+// RenameMIDs rewrites the a=mid lines and the BUNDLE group of an SDP with mapping (old -> new).
+func RenameMIDs(sdp string, mapping map[string]string) string {
+	lines := strings.SplitAfter(sdp, "\n")
+	for i, line := range lines {
+		body := strings.TrimRight(line, "\r\n")
+		eol := line[len(body):]
+		switch {
+		case strings.HasPrefix(body, "a=mid:"):
+			if to, ok := mapping[strings.TrimSpace(body[len("a=mid:"):])]; ok {
+				lines[i] = "a=mid:" + to + eol
+			}
+		case strings.HasPrefix(body, "a=group:"):
+			f := strings.Fields(body)
+			for j := 1; j < len(f); j++ {
+				if to, ok := mapping[f[j]]; ok {
+					f[j] = to
+				}
+			}
+			lines[i] = strings.Join(f, " ") + eol
+		}
+	}
+	return strings.Join(lines, "")
+}
+
+// PlanBToUnifiedMIDs maps the mids of a Plan B description (Messenger's mobile apps name them
+// audio/video/data) to the ones a Unified Plan connection uses at the same m-line positions (from
+// its current local description), so the connection can take the Plan B side's renegotiation. New
+// trailing sections get their position as mid. Renaming our answer with the inverse mapping gives
+// the Plan B side its own names back. With one track per section (what a 1:1 call has), that is the
+// whole difference between the two.
+func PlanBToUnifiedMIDs(remote, local string) map[string]string {
+	remoteMIDs, localMIDs := MIDs(remote), MIDs(local)
+	used := map[string]bool{}
+	for _, mid := range localMIDs {
+		used[mid] = true
+	}
+	mapping := map[string]string{}
+	for i, from := range remoteMIDs {
+		if from == "" {
+			continue
+		}
+		var to string
+		if i < len(localMIDs) && localMIDs[i] != "" {
+			to = localMIDs[i]
+		} else {
+			to = strconv.Itoa(i)
+			for used[to] {
+				to += "_"
+			}
+			used[to] = true
+		}
+		if to != from {
+			mapping[from] = to
+		}
+	}
+	return mapping
+}
+
+// InvertMIDs swaps a mid mapping's keys and values.
+func InvertMIDs(mapping map[string]string) map[string]string {
+	out := make(map[string]string, len(mapping))
+	for from, to := range mapping {
+		out[to] = from
+	}
+	return out
+}
+
+// CollapseSimulcast keeps one track per media section of a Plan B offer: where a section sends
+// simulcast (a=ssrc-group:SIM low mid high), only the first layer stays, with its RTX partner
+// (a=ssrc-group:FID) and its a=ssrc lines. Pion takes several SSRCs of one section as several
+// tracks, which it rejects on a Unified Plan connection; the SFU-less 1:1 call needs one layer anyway.
+func CollapseSimulcast(sdp string) string {
+	lines := strings.SplitAfter(sdp, "\n")
+	type section struct{ start, end int }
+	var secs []section
+	for i, line := range lines {
+		if strings.HasPrefix(line, "m=") {
+			if len(secs) > 0 {
+				secs[len(secs)-1].end = i
+			}
+			secs = append(secs, section{start: i, end: len(lines)})
+		}
+	}
+	drop := map[int]bool{}
+	for _, sec := range secs {
+		var sim []string
+		fid := map[string]string{} // primary -> rtx
+		for i := sec.start; i < sec.end; i++ {
+			body := strings.TrimRight(lines[i], "\r\n")
+			if strings.HasPrefix(body, "a=ssrc-group:SIM ") {
+				sim = strings.Fields(body)[1:]
+			} else if f := strings.Fields(body); len(f) == 3 && f[0] == "a=ssrc-group:FID" {
+				fid[f[1]] = f[2]
+			}
+		}
+		if len(sim) < 2 {
+			continue
+		}
+		keep := map[string]bool{sim[0]: true}
+		if rtx, ok := fid[sim[0]]; ok {
+			keep[rtx] = true
+		}
+		for i := sec.start; i < sec.end; i++ {
+			body := strings.TrimRight(lines[i], "\r\n")
+			switch {
+			case strings.HasPrefix(body, "a=ssrc-group:SIM "):
+				drop[i] = true
+			case strings.HasPrefix(body, "a=ssrc-group:FID "):
+				if f := strings.Fields(body); len(f) == 3 && !keep[f[1]] {
+					drop[i] = true
+				}
+			case strings.HasPrefix(body, "a=ssrc:"):
+				if f := strings.Fields(body[len("a=ssrc:"):]); len(f) > 0 && !keep[f[0]] {
+					drop[i] = true
+				}
+			}
+		}
+	}
+	var b strings.Builder
+	for i, line := range lines {
+		if !drop[i] {
+			b.WriteString(line)
+		}
+	}
+	return b.String()
+}
+
+// AdaptPlanBOffer makes a Plan B renegotiation offer acceptable to a Unified Plan connection whose
+// current local description is `local`: one simulcast layer per section, and our mids. It returns
+// the offer and the mapping to undo on our answer (RenameMIDs(answer, InvertMIDs(mapping))).
+func AdaptPlanBOffer(offer, local string) (string, map[string]string) {
+	offer = CollapseSimulcast(offer)
+	mapping := PlanBToUnifiedMIDs(offer, local)
+	return RenameMIDs(offer, mapping), mapping
 }

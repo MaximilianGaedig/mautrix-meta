@@ -282,3 +282,48 @@ func TestJoinPreventsSFU(t *testing.T) {
 		}
 	}
 }
+
+// TestClientMediaUpdateRoundTrip: the CLIENT_MEDIA_UPDATE a client sends to turn its camera on
+// (web client toThriftClientMediaUpdateRequest) survives encoding, and its response decodes.
+func TestClientMediaUpdateRoundTrip(t *testing.T) {
+	ring := fakeRing()
+	cc := NewCallContext(fakeCallee, ring.Header.ConferenceName, ring.Header.ServerInfoData)
+	tracks := map[string]TrackInfo{
+		"audio-track": {Enabled: true, Label: TrackLabelAudio},
+		"video-track": {Enabled: true, Label: TrackLabelVideo},
+	}
+	msg := cc.NewClientMediaUpdate(3, tracks, "v=0\r\n")
+	enc, err := EncodePayload(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := DecodePayload(enc, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := back.Body.ClientMediaUpdateRequest
+	if back.Header.Type != TypeClientMediaUpdate || req == nil {
+		t.Fatalf("not a client media update: %v", back.Header.Type)
+	}
+	if req.FromVersion != 3 || req.ToVersion != 3 || req.Offer == nil || req.Offer.SDP != "v=0\r\n" ||
+		len(req.MediaUpdates) != 1 || !req.MediaUpdates[0].MediaStatus["video-track"] ||
+		req.MediaUpdates[0].MediaStatusEx["video-track"].Label != TrackLabelVideo {
+		t.Fatalf("request mismatch: %+v", req)
+	}
+
+	resp := NewResponse(back, 1, fakeCaller, "session", Body{ClientMediaUpdateResponse: &ClientMediaUpdateResponse{
+		CurrentVersion: 3, Answer: &SessionDescription{SDP: "answer"}, SDPOriginLocalID: fakeCaller, MediaPath: MediaPathP2P,
+	}})
+	enc, err = EncodePayload(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodePayload(enc, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := got.Body.ClientMediaUpdateResponse
+	if r == nil || r.CurrentVersion != 3 || r.Answer == nil || r.Answer.SDP != "answer" || r.SDPOriginLocalID != fakeCaller || r.MediaPath != MediaPathP2P {
+		t.Fatalf("response mismatch: %+v", r)
+	}
+}

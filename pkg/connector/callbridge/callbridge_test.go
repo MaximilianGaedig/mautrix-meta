@@ -579,3 +579,108 @@ func TestVideoUpgradeRenegotiation(t *testing.T) {
 		t.Fatalf("read: %v %v", p, err)
 	}
 }
+
+// planBCameraOffer turns a Unified Plan renegotiation offer into what Messenger's mobile apps send
+// when the camera turns on: Plan B section names, and the video sent as three simulcast layers
+// (each with an RTX partner) in one section, which Pion takes as three tracks.
+func planBCameraOffer(t *testing.T, unified string) (string, map[string]string) {
+	t.Helper()
+	planB := map[string]string{}
+	for i, mid := range MIDs(unified) {
+		planB[mid] = []string{"audio", "video", "data"}[i]
+	}
+	offer := RenameMIDs(unified, planB)
+	var b strings.Builder
+	inVideo, added := false, false
+	for _, line := range strings.SplitAfter(offer, "\n") {
+		if strings.HasPrefix(line, "m=") {
+			inVideo = strings.HasPrefix(line, "m=video")
+		}
+		if inVideo && !added && strings.HasPrefix(line, "a=ssrc:") {
+			primary := strings.Fields(line[len("a=ssrc:"):])[0]
+			b.WriteString("a=ssrc-group:SIM " + primary + " 1111 2222\r\n")
+			b.WriteString(line)
+			b.WriteString("a=ssrc-group:FID 1111 1112\r\na=ssrc-group:FID 2222 2223\r\n")
+			for _, s := range []string{"1111", "1112", "2222", "2223"} {
+				b.WriteString("a=ssrc:" + s + " cname:layer\r\na=ssrc:" + s + " msid:stream layer" + s + "\r\n")
+			}
+			added = true
+			continue
+		}
+		b.WriteString(line)
+	}
+	if !added {
+		t.Fatal("no video ssrc to extend")
+	}
+	return b.String(), planB
+}
+
+// TestPlanBRenegotiationOnUnifiedLeg: a Messenger mobile peer turns its camera on mid-call and
+// renegotiates in Plan B (audio/video names, simulcast layers in one section) on a leg we opened as
+// Unified Plan. Pion rejects that as it is; adapted (one layer, our mids) it's accepted, our answer
+// goes back with the peer's own names, and the peer's video arrives.
+func TestPlanBRenegotiationOnUnifiedLeg(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	mk := func(name string) *Leg {
+		l, err := NewLeg(LegConfig{Name: name, AllowVideo: true, Settings: loopbackSettings(), Log: zerolog.Nop()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(l.Close)
+		return l
+	}
+	cameraOffer := func(phone *Leg) (string, map[string]string) {
+		if err := phone.AddVideoTrack(webrtc.MimeTypeVP8); err != nil {
+			t.Fatal(err)
+		}
+		unified, err := phone.Renegotiate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return planBCameraOffer(t, unified)
+	}
+
+	metaLeg, phone := mk("messenger"), mk("phone")
+	connect(t, ctx, metaLeg, phone)
+	offer, _ := cameraOffer(phone)
+	if _, err := metaLeg.AnswerOffer(offer); err == nil {
+		t.Fatal("expected Pion to reject the Plan B offer as it is")
+	}
+
+	// A fresh pair, since the failed attempt left the first leg half-applied.
+	metaLeg, phone = mk("messenger2"), mk("phone2")
+	connect(t, ctx, metaLeg, phone)
+	offer, planB := cameraOffer(phone)
+	adapted, mapping := AdaptPlanBOffer(offer, metaLeg.PC.LocalDescription().SDP)
+	answer, err := metaLeg.AnswerOffer(adapted)
+	if err != nil {
+		t.Fatalf("answering the adapted offer: %v", err)
+	}
+	answer = RenameMIDs(answer, InvertMIDs(mapping))
+	for _, mid := range MIDs(answer) {
+		if mid != "audio" && mid != "video" && mid != "data" {
+			t.Fatalf("answer mids not renamed back: %v", MIDs(answer))
+		}
+	}
+	// The phone reads our answer with its own names.
+	if err = phone.SetAnswer(RenameMIDs(answer, InvertMIDs(planB))); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for i := uint16(0); ctx.Err() == nil; i++ {
+			_ = phone.LocalVideo.WriteRTP(&rtp.Packet{
+				Header:  rtp.Header{Version: 2, SequenceNumber: i, Timestamp: uint32(i) * VideoFrameTicks, Marker: true},
+				Payload: []byte("camera"),
+			})
+			time.Sleep(33 * time.Millisecond)
+		}
+	}()
+	tr, err := metaLeg.RemoteVideoTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _, err := tr.ReadRTP(); err != nil || string(p.Payload) != "camera" {
+		t.Fatalf("read: %v %v", p, err)
+	}
+}

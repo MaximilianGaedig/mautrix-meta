@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-meta/pkg/connector/callbridge"
+	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 )
 
@@ -423,9 +425,8 @@ func (s *callSession) startRTCRelay() {
 	go audio("messenger", metaLeg.RemoteTrack, rtc.AudioWriter())
 	go audio("matrixrtc", rtc.RemoteAudio, metaLeg.Local)
 	go s.relayMetaVideoToRTC(metaLeg, rtc)
-	if metaLeg.LocalVideo != nil {
-		go s.relayRTCVideoToMeta(rtc, metaLeg)
-	}
+	// Also for audio calls: when the Matrix user turns their camera on, Messenger gets it too.
+	go s.relayRTCVideoToMeta(rtc, metaLeg)
 	time.AfterFunc(callSetupTimeout, func() {
 		if !s.mediaConnected.Load() && s.ctx.Err() == nil {
 			s.log.Warn().Msg("Messenger media didn't connect in time")
@@ -459,6 +460,13 @@ func (s *callSession) relayRTCVideoToMeta(rtc *callbridge.RTCLeg, metaLeg *callb
 	tr, err := rtc.RemoteVideo(s.ctx)
 	if err != nil {
 		return
+	}
+	if metaLeg.LocalVideo == nil {
+		// An audio call: add video on the Messenger side first.
+		if err = s.sendMetaVideo(tr.Codec().MimeType); err != nil {
+			s.log.Err(err).Msg("Failed to turn on video towards Messenger")
+			return
+		}
 	}
 	if got, want := tr.Codec().MimeType, s.videoCodec; !strings.EqualFold(got, want) {
 		s.log.Warn().Str("matrix_codec", got).Str("messenger_codec", want).
@@ -562,4 +570,62 @@ func (cb *callBridge) handleRTCDecline(evt *event.Event) {
 		s.log.Info().Msg("Declined in Matrix (MatrixRTC)")
 		go s.end(endLocalDecline, "")
 	}
+}
+
+// sendMetaVideo adds a video track to an audio call's Messenger leg and renegotiates it, the way
+// the web client does when its camera turns on: CLIENT_MEDIA_UPDATE with the tracks and an offer,
+// answered in the response (or in a SERVER_MEDIA_UPDATE).
+func (s *callSession) sendMetaVideo(mime string) error {
+	s.lock.Lock()
+	leg, cc := s.metaLeg, s.cc
+	if s.clientMediaVersion < 1 {
+		s.clientMediaVersion = 1 // the JOIN's media state
+	}
+	s.clientMediaVersion++
+	version := s.clientMediaVersion
+	s.lock.Unlock()
+	if leg == nil || cc == nil {
+		return errors.New("not in the Messenger call")
+	}
+	if err := leg.AddVideoTrack(mime); err != nil {
+		return fmt.Errorf("add video track: %w", err)
+	}
+	offer, err := leg.Renegotiate()
+	if err == nil {
+		offer, err = callbridge.PrepareMetaLocalSDP(offer, s.m.callIdentity(), true)
+	}
+	if err != nil {
+		return fmt.Errorf("create video offer: %w", err)
+	}
+	tracks := map[string]rtcsignal.TrackInfo{
+		leg.TrackID:      {Enabled: true, Label: rtcsignal.TrackLabelAudio},
+		leg.VideoTrackID: {Enabled: true, Label: rtcsignal.TrackLabelVideo},
+	}
+	resp, err := s.cb.sig.Request(s.ctx, cc.NewClientMediaUpdate(version, tracks, offer))
+	if err != nil {
+		return fmt.Errorf("CLIENT_MEDIA_UPDATE: %w", err)
+	}
+	s.lock.Lock()
+	s.videoCodec = mime
+	s.lock.Unlock()
+	cmu := resp.Body.ClientMediaUpdateResponse
+	if cmu == nil || cmu.Answer == nil || cmu.Answer.SDP == "" {
+		// The peer's answer comes as a SERVER_MEDIA_UPDATE instead.
+		s.log.Info().Int64("version", version).Msg("Sent CLIENT_MEDIA_UPDATE, waiting for Messenger's answer")
+		return nil
+	}
+	origin, _ := strconv.ParseInt(cmu.SDPOriginLocalID, 10, 64)
+	if origin == 0 {
+		origin = s.peerID
+	}
+	if err = s.verifyPeerSDP(cmu.Answer.SDP, origin); err != nil {
+		return fmt.Errorf("verify answer: %w", err)
+	}
+	if err = leg.SetRenegotiationAnswer(callbridge.PrepareMetaRemoteSDP(cmu.Answer.SDP)); err != nil {
+		callbridge.LogSDPShape(s.log.Err(err), cmu.Answer.SDP).Msg("Failed to apply Messenger's answer to our video")
+		return err
+	}
+	s.log.Info().Int64("version", version).Int64("current_version", cmu.CurrentVersion).
+		Msg("Turned on video towards Messenger")
+	return nil
 }

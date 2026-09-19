@@ -323,6 +323,9 @@ type callSession struct {
 	rtcUserPresent bool
 	rtcVideoIntent bool // ring as a video call
 
+	// clientMediaVersion is our media state version for CLIENT_MEDIA_UPDATE.
+	clientMediaVersion int64
+
 	endOnce sync.Once
 }
 
@@ -515,6 +518,18 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 	}
 	switch sdpType {
 	case "answer":
+		s.lock.Lock()
+		already := s.metaAnswered
+		s.lock.Unlock()
+		if already {
+			// The answer to our own mid-call offer (e.g. our camera turning on), not a pickup.
+			if err := leg.SetRenegotiationAnswer(callbridge.PrepareMetaRemoteSDP(sd.SDP)); err != nil {
+				callbridge.LogSDPShape(s.log.Err(err), sd.SDP).Msg("Failed to apply Messenger renegotiation answer")
+			} else {
+				s.log.Info().Msg("Messenger accepted our renegotiation")
+			}
+			break
+		}
 		callbridge.LogSDPShape(s.log.Debug(), sd.SDP).Msg("Messenger answer")
 		s.log.Info().Msg("Messenger peer answered")
 		if err := leg.SetAnswer(callbridge.PrepareMetaRemoteSDP(sd.SDP)); err != nil {
@@ -527,18 +542,22 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		s.lock.Unlock()
 		go s.answerMatrixOutgoing()
 	case "offer":
-		// A renegotiation: answer it in the SMU response.
-		answer, err := leg.AnswerOffer(callbridge.PrepareMetaRemoteSDP(sd.SDP))
+		// A renegotiation: answer it in the SMU response. Messenger's mobile apps renegotiate in
+		// Plan B even on a call we set up in Unified Plan (see Leg.AnswerRenegotiation).
+		offersVideo := callbridge.SendsVideo(sd.SDP)
+		answer, err := leg.AnswerRenegotiation(callbridge.PrepareMetaRemoteSDP(sd.SDP))
 		if err == nil {
-			answer, err = callbridge.PrepareMetaLocalSDP(answer, s.m.callIdentity(), s.videoCodec != "")
+			answer, err = callbridge.PrepareMetaLocalSDP(answer, s.m.callIdentity(), s.videoCodec != "" || offersVideo)
 		}
 		if err != nil {
-			s.log.Err(err).Msg("Failed to answer Messenger renegotiation")
+			callbridge.LogSDPShape(s.log.Err(err), sd.SDP).Bool("leg_plan_b", leg.IsPlanB()).
+				Msg("Failed to answer Messenger renegotiation")
 			break
 		}
 		s.log.Info().Msg("Answered Messenger renegotiation")
 		resp.Answer = &rtcsignal.SessionDescription{SDP: answer}
-		if s.videoCodec == "" && callbridge.SendsVideo(sd.SDP) {
+		// In MatrixRTC calls the video relay is already waiting for Messenger's camera.
+		if s.videoCodec == "" && offersVideo && !s.rtcMode {
 			go s.upgradeMatrixToVideo()
 		}
 	}

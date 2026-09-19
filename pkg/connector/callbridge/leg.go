@@ -512,6 +512,42 @@ func (l *Leg) Close() {
 	}
 }
 
+// IsPlanB reports whether the leg runs with Plan B semantics.
+func (l *Leg) IsPlanB() bool { return l.cfg.PlanB }
+
+// adaptRemote makes a remote description from a Plan B peer fit a Unified Plan leg (see
+// AdaptPlanBOffer); the mapping undoes the renaming on our own reply.
+func (l *Leg) adaptRemote(sdp string) (string, map[string]string) {
+	if l.cfg.PlanB || !IsPlanB(sdp) {
+		return sdp, nil
+	}
+	local := ""
+	if d := l.PC.LocalDescription(); d != nil {
+		local = d.SDP
+	}
+	return AdaptPlanBOffer(sdp, local)
+}
+
+// AnswerRenegotiation answers a mid-call offer, adapting a Plan B one from Messenger's mobile
+// apps to a Unified Plan leg, and returns the answer in the peer's own terms.
+func (l *Leg) AnswerRenegotiation(offer string) (string, error) {
+	offer, mapping := l.adaptRemote(offer)
+	answer, err := l.AnswerOffer(offer)
+	if err != nil {
+		return "", err
+	}
+	if mapping != nil {
+		answer = RenameMIDs(answer, InvertMIDs(mapping))
+	}
+	return answer, nil
+}
+
+// SetRenegotiationAnswer applies the peer's answer to our mid-call offer, adapting a Plan B one.
+func (l *Leg) SetRenegotiationAnswer(answer string) error {
+	answer, _ = l.adaptRemote(answer)
+	return l.SetAnswer(answer)
+}
+
 func semantics(planB bool) webrtc.SDPSemantics {
 	if planB {
 		return webrtc.SDPSemanticsPlanB
