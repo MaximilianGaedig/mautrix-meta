@@ -457,7 +457,16 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 	smu := msg.Body.ServerMediaUpdateRequest
 	resp := &rtcsignal.ServerMediaUpdateResponse{CurrentVersion: smu.ToVersion}
 	if smu.MediaPath == rtcsignal.MediaPathSFU {
-		s.log.Warn().Msg("Messenger moved the call to its SFU, which the bridge can't join")
+		// Record what the SFU asks for (shape only), to build SFU support from.
+		sdpType, sd := smu.RemoteSDP()
+		ev := s.log.Warn().Str("sdp_type", sdpType).Str("sdp_origin", smu.SDPOriginLocalID).
+			Bool("renegotiation_requested", smu.RenegotiationRequested).
+			Bool("has_renegotiation_offer", smu.RenegotiationOffer != nil && smu.RenegotiationOffer.SDP != "").
+			Bool("relay_info", smu.RelayInfo != nil).Int("media_status", len(smu.MediaStatus))
+		if sd != nil && sd.SDP != "" {
+			ev = callbridge.LogSDPShape(ev, sd.SDP)
+		}
+		ev.Msg("Messenger moved the call to its SFU, which the bridge can't join")
 		go s.end(endFailed, "Messenger moved the call to a group-call server, which the bridge doesn't support")
 		return s.respond(msg, rtcsignal.Body{ServerMediaUpdateResponse: resp})
 	}

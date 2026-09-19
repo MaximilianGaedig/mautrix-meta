@@ -18,6 +18,7 @@ package callbridge
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/pion/webrtc/v4"
@@ -197,8 +198,17 @@ func LogSDPShape(e *zerolog.Event, sdp string) *zerolog.Event {
 	var secs []*section
 	var cur *section
 	ssrcs := map[string]bool{}
+	// Names only, never values: enough to spot e.g. end-to-end encryption markers.
+	attrs := map[string]bool{}
 	for _, line := range strings.Split(sdp, "\n") {
 		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "a=") {
+			name := line[2:]
+			if i := strings.IndexAny(name, ": "); i >= 0 {
+				name = name[:i]
+			}
+			attrs[name] = true
+		}
 		switch {
 		case strings.HasPrefix(line, "m="):
 			f := strings.Fields(line[2:])
@@ -229,7 +239,12 @@ func LogSDPShape(e *zerolog.Event, sdp string) *zerolog.Event {
 			}
 		}
 	}
-	return e.Interface("sdp_shape", secs)
+	names := make([]string, 0, len(attrs))
+	for name := range attrs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return e.Interface("sdp_shape", secs).Strs("sdp_attrs", names)
 }
 
 // IsPlanB reports whether an SDP uses Plan B: a media section carrying more
