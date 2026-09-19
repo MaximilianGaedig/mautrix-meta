@@ -108,9 +108,21 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
 		return nil, err
 	}
-	opts := []func(*webrtc.API){webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir)}
+	var se webrtc.SettingEngine
 	if cfg.Settings != nil {
-		opts = append(opts, webrtc.WithSettingEngine(*cfg.Settings))
+		se = *cfg.Settings
+	}
+	// Pion holds back nominating a working pair for its candidate type's
+	// "acceptance min wait": 2 s for relay and 1 s for peer-reflexive by
+	// default, which was most of the time between answering and hearing the
+	// other side. Browsers nominate as soon as a check succeeds; keep only a
+	// short head start for the better (direct) pairs.
+	se.SetHostAcceptanceMinWait(0)
+	se.SetSrflxAcceptanceMinWait(50 * time.Millisecond)
+	se.SetPrflxAcceptanceMinWait(100 * time.Millisecond)
+	se.SetRelayAcceptanceMinWait(200 * time.Millisecond)
+	opts := []func(*webrtc.API){
+		webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir), webrtc.WithSettingEngine(se),
 	}
 	api := webrtc.NewAPI(opts...)
 	pc, err := api.NewPeerConnection(webrtc.Configuration{

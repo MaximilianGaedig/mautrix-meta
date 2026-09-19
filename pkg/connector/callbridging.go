@@ -246,6 +246,9 @@ type callSession struct {
 	remoteCands    []webrtc.ICECandidateInit
 	joined         bool
 	metaAnswered   bool
+	metaPrepare    sync.Once
+	metaAnswer     string // incoming: our signed answer, prepared while ringing
+	metaAnswerErr  error
 	mediaConnected atomic.Bool
 
 	// Matrix side
@@ -474,11 +477,15 @@ func (s *callSession) onLocalMetaCandidate(c *webrtc.ICECandidateInit) {
 }
 
 func (s *callSession) sendMetaCandidates(cc *rtcsignal.CallContext, cands []rtcsignal.IceCandidate) {
+	// The web client sends one candidate per message. Waiting for each
+	// acknowledgement before the next cost ~40 ms per candidate, so the
+	// queued ones go out together.
 	for _, c := range cands {
-		// The web client sends one candidate per message.
-		if _, err := s.cb.sig.Request(s.ctx, cc.NewIceCandidates(c)); err != nil && s.ctx.Err() == nil {
-			s.log.Debug().Err(err).Msg("Failed to send ICE candidate to Messenger")
-		}
+		go func() {
+			if _, err := s.cb.sig.Request(s.ctx, cc.NewIceCandidates(c)); err != nil && s.ctx.Err() == nil {
+				s.log.Debug().Err(err).Msg("Failed to send ICE candidate to Messenger")
+			}
+		}()
 	}
 }
 
@@ -726,6 +733,11 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 		s.end(endFailed, "")
 		return
 	}
+	go func() {
+		if _, err := s.prepareMessengerAnswer(); err != nil {
+			s.log.Warn().Err(err).Msg("Failed to prepare Messenger answer while ringing")
+		}
+	}()
 	time.AfterFunc(callInviteLifetime, func() {
 		s.lock.Lock()
 		answered := s.mxAnswered
@@ -971,34 +983,63 @@ func (s *callSession) join(cc *rtcsignal.CallContext, params *rtcsignal.JoinPara
 	return nil
 }
 
-// answerMessenger runs when the Matrix user answered: JOIN the Messenger
-// call with an answer to the ring's offer.
-func (s *callSession) answerMessenger() {
+// prepareMessengerAnswer creates the Messenger leg and its signed answer to
+// the ring's offer while Matrix is still ringing, so ICE gathering (and the
+// TURN allocations) are done by the time the user answers.
+func (s *callSession) prepareMessengerAnswer() (string, error) {
+	// A second caller (the user answering mid-preparation) waits for the first.
+	s.metaPrepare.Do(func() {
+		s.metaAnswer, s.metaAnswerErr = s.buildMessengerAnswer()
+	})
+	return s.metaAnswer, s.metaAnswerErr
+}
+
+func (s *callSession) buildMessengerAnswer() (string, error) {
 	id := s.m.callIdentity()
 	if id == nil {
-		s.log.Error().Msg("No E2EE device identity, can't sign x-dtls-auth")
-		s.end(endFailed, "The bridge has no Messenger encryption device, so it can't answer calls")
-		return
+		return "", errNoCallIdentity
 	}
 	leg, err := s.newMetaLeg()
 	if err != nil {
-		s.log.Err(err).Msg("Failed to create Messenger PeerConnection")
-		s.end(endFailed, "")
-		return
+		return "", fmt.Errorf("create Messenger PeerConnection: %w", err)
+	}
+	if s.ctx.Err() != nil {
+		// The call ended while ringing, after end() collected the legs.
+		leg.Close()
+		return "", s.ctx.Err()
 	}
 	s.lock.Lock()
 	offer := s.ringOffer
-	cc := rtcsignal.NewCallContext(strconv.FormatInt(s.m.selfFBID(), 10), s.conference, s.serverInfoData)
 	s.lock.Unlock()
 	answer, err := leg.AnswerOffer(callbridge.PrepareMetaRemoteSDP(offer))
 	if err == nil {
 		answer, err = callbridge.PrepareMetaLocalSDP(answer, id)
 	}
 	if err != nil {
-		s.log.Err(err).Msg("Failed to create Messenger answer")
+		return "", fmt.Errorf("create Messenger answer: %w", err)
+	}
+	return answer, nil
+}
+
+var errNoCallIdentity = errors.New("no E2EE device identity to sign x-dtls-auth")
+
+// answerMessenger runs when the Matrix user answered: JOIN the Messenger
+// call with an answer to the ring's offer.
+func (s *callSession) answerMessenger() {
+	answer, err := s.prepareMessengerAnswer()
+	if errors.Is(err, errNoCallIdentity) {
+		s.log.Error().Msg("No E2EE device identity, can't sign x-dtls-auth")
+		s.end(endFailed, "The bridge has no Messenger encryption device, so it can't answer calls")
+		return
+	} else if err != nil {
+		s.log.Err(err).Msg("Failed to prepare Messenger answer")
 		s.end(endFailed, "")
 		return
 	}
+	s.lock.Lock()
+	leg := s.metaLeg
+	cc := rtcsignal.NewCallContext(strconv.FormatInt(s.m.selfFBID(), 10), s.conference, s.serverInfoData)
+	s.lock.Unlock()
 	s.startRelay()
 	if err = s.join(cc, &rtcsignal.JoinParams{
 		Answer:       answer,
