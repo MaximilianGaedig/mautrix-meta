@@ -57,6 +57,7 @@ type MetaClient struct {
 	lastFullReconnect     time.Time
 	lastError24Reconnect  time.Time
 	connectWaiter         *exsync.Event
+	calls                 *callTracker
 	e2eeConnectWaiter     *exsync.Event
 	firstE2EEConnectDone  bool
 
@@ -103,6 +104,8 @@ func (m *MetaConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserL
 
 		connectWaiter:     exsync.NewEvent(),
 		e2eeConnectWaiter: exsync.NewEvent(),
+
+		calls: newCallTracker(metaid.ParseUserLoginID(login.ID)),
 	}
 	c.editChannels = exsync.NewMap[string, chan *FBEditEvent]()
 	login.Client = c
@@ -497,6 +500,7 @@ func (m *MetaClient) connectE2EE() error {
 			return fmt.Errorf("failed to save device ID to user login: %w", err)
 		}
 	}
+	m.Client.E2EENodeTap = m.handleE2EENode
 	m.E2EEClient, err = m.Client.PrepareE2EEClient()
 	if err != nil {
 		return fmt.Errorf("failed to prepare e2ee client: %w", err)

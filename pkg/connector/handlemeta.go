@@ -393,6 +393,7 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 	collectPortalEvents(params, tbl.LSUpsertReaction, m.handleUpsertReaction, &innerQueue)
 	collectPortalEvents(params, tbl.LSDeleteReaction, m.handleDeleteReaction, &innerQueue)
 	collectPortalEvents(params, tbl.LSRemoveParticipantFromThread, m.handleRemoveParticipant, &innerQueue)
+	m.handleTableCalls(ctx, tbl, params.portalKeyFor)
 	// TODO request more inbox if applicable
 
 	for _, igThread := range tbl.LSDeleteThenInsertIgThreadInfo {
@@ -795,6 +796,23 @@ func (tm threadMaps) MapWhatsAppThreadKey(fbKey int64) int64 {
 		return waKey
 	}
 	return fbKey
+}
+
+// portalKeyFor resolves a Lightspeed thread key to a portal key the same way
+// collectPortalEvents does (without the subthread lookup).
+func (tm threadMaps) portalKeyFor(fbKey int64) networkid.PortalKey {
+	threadKey := tm.MapWhatsAppThreadKey(fbKey)
+	var threadType table.ThreadType
+	if v, ok := tm.vtes[threadKey]; ok {
+		threadType = v.ThreadType
+	} else if sync, ok := tm.syncs[threadKey]; ok {
+		if sync.Raw != nil {
+			threadType = sync.Raw.ThreadType
+		} else {
+			threadType = sync.Update.ThreadType
+		}
+	}
+	return tm.m.makeFBPortalKey(threadKey, threadType)
 }
 
 type handlerParams struct {

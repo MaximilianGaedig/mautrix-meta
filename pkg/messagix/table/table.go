@@ -165,6 +165,9 @@ type LSTable struct {
 	LSDeleteMessageRequest                           []*LSDeleteMessageRequest                           `json:",omitempty"`
 	LSFillDeanonCacheForE2EEThread                   []*LSFillDeanonCacheForE2EEThread                   `json:",omitempty"`
 	LSDisableSyncForSyncGroup                        []*LSDisableSyncForSyncGroup                        `json:",omitempty"`
+	LSUpdateThreadOngoingCallState                   []*LSUpdateThreadOngoingCallState                   `json:",omitempty"`
+	LSUpdateOrInsertRtcOngoingCallData               []*LSUpdateOrInsertRtcOngoingCallData               `json:",omitempty"`
+	LSDeleteRtcOngoingCallData                       []*LSDeleteRtcOngoingCallData                       `json:",omitempty"`
 }
 
 func (t *LSTable) NonNilFields() (fields []string) {
@@ -335,6 +338,9 @@ var SPTable = map[string]string{
 	"deleteMessageRequest":                           "LSDeleteMessageRequest",
 	"fillDeanonCacheForE2EEThread":                   "LSFillDeanonCacheForE2EEThread",
 	"disableSyncForSyncGroup":                        "LSDisableSyncForSyncGroup",
+	"updateThreadOngoingCallState":                   "LSUpdateThreadOngoingCallState",
+	"updateOrInsertRtcOngoingCallData":               "LSUpdateOrInsertRtcOngoingCallData",
+	"deleteRtcOngoingCallData":                       "LSDeleteRtcOngoingCallData",
 }
 
 func SPToDepMap(sp []string) map[string]string {

@@ -39,7 +39,10 @@ func (c *Client) PrepareE2EEClient() (*whatsmeow.Client, error) {
 	} else if c.device == nil {
 		return nil, fmt.Errorf("PrepareE2EEClient called without device")
 	}
-	e2eeClient := whatsmeow.NewClient(c.device, waLog.Zerolog(c.Logger.With().Str("component", "whatsmeow").Logger()))
+	e2eeClient := whatsmeow.NewClient(c.device, wrapE2EELogger(
+		waLog.Zerolog(c.Logger.With().Str("component", "whatsmeow").Logger()),
+		c.E2EENodeTap,
+	))
 	e2eeClient.GetClientPayload = c.getClientPayload
 	e2eeClient.MessengerConfig = &whatsmeow.MessengerConfig{
 		UserAgent:    useragent.UserAgent,

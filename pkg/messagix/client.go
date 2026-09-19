@@ -14,6 +14,7 @@ import (
 	"go.mau.fi/util/exhttp"
 	"go.mau.fi/util/exsync"
 	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/store"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/cookies"
@@ -40,7 +41,11 @@ type Client struct {
 	Facebook      *FacebookMethods
 	MessengerLite *MessengerLiteMethods
 	Logger        zerolog.Logger
-	Platform      types.Platform
+
+	// E2EENodeTap, if set before PrepareE2EEClient, is called with every node
+	// the E2EE (whatsmeow) socket receives, on the read loop; it must not block.
+	E2EENodeTap func(*waBinary.Node)
+	Platform    types.Platform
 
 	socket             *dgw.Socket
 	socketWasSynced    atomic.Bool
