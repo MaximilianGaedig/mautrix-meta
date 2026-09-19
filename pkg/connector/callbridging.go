@@ -281,6 +281,7 @@ type callSession struct {
 	remoteCands    []webrtc.ICECandidateInit
 	joined         bool
 	metaAnswered   bool
+	upgrading      bool // Matrix leg being upgraded to video
 	metaPrepare    sync.Once
 	metaICEOnce    sync.Once
 	metaICE        []webrtc.ICEServer
@@ -506,6 +507,9 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		}
 		s.log.Info().Msg("Answered Messenger renegotiation")
 		resp.Answer = &rtcsignal.SessionDescription{SDP: answer}
+		if s.videoCodec == "" && callbridge.SendsVideo(sd.SDP) {
+			go s.upgradeMatrixToVideo()
+		}
 	}
 	return s.respond(msg, rtcsignal.Body{ServerMediaUpdateResponse: resp})
 }
@@ -850,6 +854,8 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 func (s *callSession) ringMatrix() error {
 	leg, err := callbridge.NewLeg(callbridge.LegConfig{
 		Name: "matrix", ICEServers: s.matrixICEServers(), VideoCodec: s.videoCodec, Log: s.log,
+		// Messenger can turn an audio call into a video call later.
+		AllowVideo: true,
 	})
 	if err != nil {
 		return err
@@ -1044,6 +1050,11 @@ func (s *callSession) relayVideo(from, to *callbridge.Leg) {
 		}
 		return
 	}
+	s.relayVideoTrack(tr, from, to)
+}
+
+// relayVideoTrack relays the already received remote video track tr of `from`.
+func (s *callSession) relayVideoTrack(tr *webrtc.TrackRemote, from, to *callbridge.Leg) {
 	ssrc := tr.SSRC()
 	var lastPLI atomic.Int64
 	requestKeyframe := func() {
@@ -1073,7 +1084,7 @@ func (s *callSession) relayVideo(from, to *callbridge.Leg) {
 	}()
 	var stats callbridge.RelayStats
 	rlog := s.log.With().Str("from", from.Name).Str("to", to.Name).Str("codec", tr.Codec().MimeType).Logger()
-	err = callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), to.LocalVideo, &stats, rlog)
+	err := callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), to.LocalVideo, &stats, rlog)
 	rlog.Info().AnErr("relay_err", err).
 		Uint64("forwarded", stats.Forwarded.Load()).
 		Uint64("dropped", stats.Dropped.Load()).
@@ -1286,6 +1297,8 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 	// Messenger peer picks up.
 	mxLeg, err := callbridge.NewLeg(callbridge.LegConfig{
 		Name: "matrix", ICEServers: s.matrixICEServers(), VideoCodec: s.videoCodec, Log: s.log,
+		// Messenger can turn an audio call into a video call later.
+		AllowVideo: true,
 	})
 	if err != nil {
 		s.log.Err(err).Msg("Failed to create Matrix PeerConnection")
@@ -1478,17 +1491,81 @@ func (cb *callBridge) handleMatrixEvent(ctx context.Context, portal *bridgev2.Po
 	}
 }
 
+// upgradeMatrixToVideo follows Messenger turning an audio call into a video
+// call: it adds a video track on the Matrix leg, renegotiates with Element
+// (m.call.negotiate offer; Element answers the same way) and relays the
+// Messenger peer's video to it. The track shares the audio's stream, so
+// Element adds it to the existing feed.
+func (s *callSession) upgradeMatrixToVideo() {
+	s.lock.Lock()
+	if s.videoCodec != "" || s.upgrading {
+		s.lock.Unlock()
+		return
+	}
+	s.upgrading = true
+	mxLeg, metaLeg := s.mxLeg, s.metaLeg
+	s.lock.Unlock()
+	if mxLeg == nil || metaLeg == nil {
+		return
+	}
+	// The codec is whatever the renegotiation settled on, so wait for the
+	// Messenger peer's video track rather than guessing from the offer.
+	ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
+	tr, err := metaLeg.RemoteVideoTrack(ctx)
+	cancel()
+	if err != nil {
+		s.log.Warn().Err(err).Msg("Messenger renegotiated video but sent none")
+		return
+	}
+	codec := tr.Codec().MimeType
+	s.lock.Lock()
+	s.videoCodec = codec
+	s.lock.Unlock()
+	if err := mxLeg.AddVideoTrack(codec); err != nil {
+		s.log.Err(err).Msg("Failed to add video to the Matrix leg")
+		return
+	}
+	offer, err := mxLeg.Renegotiate()
+	if err != nil {
+		s.log.Err(err).Msg("Failed to renegotiate the Matrix leg for video")
+		return
+	}
+	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallNegotiate, callEventContent(&event.CallNegotiateEventContent{
+		BaseCallEventContent: s.baseCallContent(),
+		Lifetime:             int(callInviteLifetime / time.Millisecond),
+		Description:          event.CallData{SDP: offer, Type: event.CallDataTypeOffer},
+	}), nil)
+	if err != nil {
+		s.log.Err(err).Msg("Failed to send m.call.negotiate offer")
+		return
+	}
+	s.log.Info().Str("video_codec", codec).Msg("Messenger turned on video, renegotiating with Element")
+	s.relayVideoTrack(tr, metaLeg, mxLeg)
+}
+
 // onMatrixNegotiate answers Element's renegotiation (e.g. turning the camera
 // on in a voice call), so its call stays up. The Messenger side isn't
 // renegotiated: video added mid-call only flows if the call started as video.
 func (s *callSession) onMatrixNegotiate(neg *event.CallNegotiateEventContent) {
-	if neg == nil || neg.Description.Type != event.CallDataTypeOffer || neg.Description.SDP == "" {
+	if neg == nil || neg.Description.SDP == "" {
 		return
 	}
 	s.lock.Lock()
 	leg := s.mxLeg
 	s.lock.Unlock()
 	if leg == nil {
+		return
+	}
+	if neg.Description.Type == event.CallDataTypeAnswer {
+		// Element's answer to our video upgrade (upgradeMatrixToVideo).
+		if err := leg.SetAnswer(neg.Description.SDP); err != nil {
+			s.log.Err(err).Msg("Failed to apply Element's renegotiation answer")
+		} else {
+			s.log.Info().Msg("Element accepted the video upgrade")
+		}
+		return
+	}
+	if neg.Description.Type != event.CallDataTypeOffer {
 		return
 	}
 	answer, err := leg.AnswerOffer(neg.Description.SDP)

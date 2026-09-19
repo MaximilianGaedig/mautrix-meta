@@ -518,3 +518,53 @@ func TestIsPlanB(t *testing.T) {
 		t.Fatal("two tracks in one section not detected")
 	}
 }
+
+// TestVideoUpgradeRenegotiation: an audio call whose leg adds video mid-call
+// and renegotiates (Messenger turned on the camera), and the peer receives it.
+func TestVideoUpgradeRenegotiation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	mk := func(name string) *Leg {
+		l, err := NewLeg(LegConfig{Name: name, AllowVideo: true, Settings: loopbackSettings(), Log: zerolog.Nop()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(l.Close)
+		return l
+	}
+	mxLeg, element := mk("matrix"), mk("element")
+	connect(t, ctx, mxLeg, element)
+	if SendsVideo(mxLeg.PC.LocalDescription().SDP) {
+		t.Fatal("audio call already sends video")
+	}
+	if err := mxLeg.AddVideoTrack(webrtc.MimeTypeVP8); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := mxLeg.Renegotiate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err := element.AnswerOffer(offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = mxLeg.SetAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for i := uint16(0); ctx.Err() == nil; i++ {
+			_ = mxLeg.LocalVideo.WriteRTP(&rtp.Packet{
+				Header:  rtp.Header{Version: 2, SequenceNumber: i, Timestamp: uint32(i) * VideoFrameTicks, Marker: true},
+				Payload: []byte("upgraded"),
+			})
+			time.Sleep(33 * time.Millisecond)
+		}
+	}()
+	tr, err := element.RemoteVideoTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _, err := tr.ReadRTP(); err != nil || string(p.Payload) != "upgraded" {
+		t.Fatalf("read: %v %v", p, err)
+	}
+}

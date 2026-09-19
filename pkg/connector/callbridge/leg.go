@@ -61,6 +61,9 @@ type LegConfig struct {
 	// call use the same one, so video is relayed without transcoding. Only
 	// that codec is registered, which forces the negotiation.
 	VideoCodec string
+	// AllowVideo registers the video codecs even for an audio call, so a video
+	// track can be added later (AddVideoTrack) when the other side upgrades.
+	AllowVideo bool
 	// Settings optionally overrides the Pion setting engine (tests use it to
 	// restrict ICE to loopback).
 	Settings *webrtc.SettingEngine
@@ -112,7 +115,7 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
-	if cfg.WebShape || cfg.VideoCodec != "" {
+	if cfg.WebShape || cfg.VideoCodec != "" || cfg.AllowVideo {
 		for _, c := range videoCodecs {
 			if cfg.VideoCodec != "" && c.MimeType != cfg.VideoCodec {
 				continue
@@ -273,6 +276,44 @@ func (l *Leg) addLocalTrack() error {
 		go l.readVideoRTCP(vsender)
 	}
 	return nil
+}
+
+// AddVideoTrack adds a video track mid-call (an audio call upgraded to
+// video); renegotiate afterwards. The codec must be registered (AllowVideo).
+func (l *Leg) AddVideoTrack(mime string) error {
+	l.lock.Lock()
+	if l.LocalVideo != nil {
+		l.lock.Unlock()
+		return nil
+	}
+	l.lock.Unlock()
+	l.VideoTrackID = uuid.NewString()
+	track, err := webrtc.NewTrackLocalStaticRTP(videoCapability(mime), l.VideoTrackID, l.StreamID)
+	if err != nil {
+		return err
+	}
+	vsender, err := l.PC.AddTrack(track)
+	if err != nil {
+		return err
+	}
+	l.lock.Lock()
+	l.LocalVideo, l.vsender = track, vsender
+	l.lock.Unlock()
+	go l.readVideoRTCP(vsender)
+	return nil
+}
+
+// Renegotiate makes and applies a new local offer on an established
+// connection (after AddVideoTrack); candidates are already in place.
+func (l *Leg) Renegotiate() (string, error) {
+	offer, err := l.PC.CreateOffer(nil)
+	if err != nil {
+		return "", err
+	}
+	if err = l.PC.SetLocalDescription(offer); err != nil {
+		return "", err
+	}
+	return l.PC.LocalDescription().SDP, nil
 }
 
 // readVideoRTCP drains the video sender's RTCP and reports the receiver's
