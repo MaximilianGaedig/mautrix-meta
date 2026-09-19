@@ -232,7 +232,7 @@ func newGroupE2ee(ctx context.Context, rt *framecrypt.Runtime, cfg groupE2eeConf
 
 // startE2ee sets up the call's encryption for our local SDP and returns our E2eeClientState.
 func (g *groupCall) startE2ee(localSDP string) ([]byte, error) {
-	rt, err := g.m.frameCryptRuntime(g.ctx, g.threadID)
+	rt, err := g.m.frameCryptRuntime(g.ctx, g.roomID())
 	if err != nil {
 		return nil, fmt.Errorf("load frame-encryption module: %w", err)
 	}

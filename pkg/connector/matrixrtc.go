@@ -582,6 +582,9 @@ func (cb *callBridge) startOutgoingRTC(ctx context.Context, portal *bridgev2.Por
 		s.abandonMessengerAttempt()
 		err = s.placeMessengerCall(id, peerID)
 	}
+	if errors.Is(err, errSFUPath) && s.cb.moveToSFU(s) {
+		return
+	}
 	if err != nil {
 		s.log.Err(err).Msg("Failed to start Messenger call")
 		s.end(endFailed, "Failed to start the Messenger call")
@@ -604,7 +607,7 @@ func (cb *callBridge) handleRTCMembership(ctx context.Context, portal *bridgev2.
 	cb.lock.Lock()
 	s, g := cb.active, cb.group
 	cb.lock.Unlock()
-	if isGroupPortal(portal) {
+	if isGroupPortal(portal) || (g != nil && g.portal.MXID == portal.MXID) {
 		switch {
 		case g != nil && g.portal.MXID == portal.MXID && mem.joined:
 			g.userJoined()

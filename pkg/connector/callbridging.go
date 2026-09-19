@@ -266,6 +266,7 @@ const (
 	endTimeout                         // nobody answered
 	endFailed                          // setup or media failure
 	endBridgeShutdown                  // bridge disconnect
+	endMovedToSFU                      // Messenger put the call on its SFU; a groupCall carries it on (moveToSFU)
 )
 
 type callSession struct {
@@ -489,8 +490,12 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		if sd != nil && sd.SDP != "" {
 			ev = callbridge.LogSDPShape(ev, sd.SDP)
 		}
-		ev.Msg("Messenger moved the call to its SFU, which the bridge can't join")
-		go s.end(endFailed, "Messenger moved the call to a group-call server, which the bridge doesn't support")
+		ev.Msg("Messenger moved the call to its SFU")
+		go func() {
+			if !s.cb.moveToSFU(s) {
+				s.end(endFailed, "Messenger moved the call to a group-call server, which the bridge only joins for MatrixRTC calls")
+			}
+		}()
 		return s.respond(msg, rtcsignal.Body{ServerMediaUpdateResponse: resp})
 	}
 	sdpType, sd := smu.RemoteSDP()
@@ -1366,7 +1371,9 @@ func (s *callSession) answerMessenger() {
 		VideoTrackID: leg.VideoTrackID,
 		E2eeState:    s.m.callE2eeState(),
 		E2eeMandated: s.e2ee,
-	}); err != nil {
+	}); errors.Is(err, errSFUPath) && s.cb.moveToSFU(s) {
+		return
+	} else if err != nil {
 		s.log.Err(err).Msg("Failed to join Messenger call")
 		s.end(endFailed, "Failed to join the Messenger call")
 		return
@@ -1783,7 +1790,7 @@ func (s *callSession) end(reason endReason, detail string) {
 
 		// Messenger side.
 		switch {
-		case reason == endRemoteHangup || reason == endDismissed:
+		case reason == endRemoteHangup || reason == endDismissed || reason == endMovedToSFU:
 		case joined && cc != nil:
 			hr := rtcsignal.HangupHangupCall
 			if !s.incoming && reason == endTimeout {

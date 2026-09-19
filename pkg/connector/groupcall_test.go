@@ -49,6 +49,13 @@ func TestGroupRingClassification(t *testing.T) {
 	if !isGroupRing(&rtcsignal.RingRequest{OtherParticipants: []string{"2", "3"}}) {
 		t.Error("a ring with several other participants wasn't taken for a group call")
 	}
+	// A 1:1 call that Messenger rings on its SFU: no offer, no group thread. It goes the group way,
+	// and startIncomingGroup hands it to startIncomingSFU1to1.
+	sfu1to1 := &rtcsignal.RingRequest{Caller: "1", OtherParticipants: []string{"2"}, MediaPath: rtcsignal.MediaPathSFU,
+		AppMessages: cc(`{"group_thread_id":null,"peer_id":"1"}`)}
+	if !isGroupRing(sfu1to1) || groupThreadOf(sfu1to1.AppMessages) != "" {
+		t.Error("a 1:1 SFU ring wasn't routed to the SFU path")
+	}
 }
 
 // TestNewGroupCallDoesNotDeadlock: newGroupCall used to call markBridged (which takes cb.lock) while

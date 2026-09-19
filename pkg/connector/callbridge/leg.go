@@ -32,6 +32,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/rs/zerolog"
+
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 )
 
@@ -237,7 +238,7 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	})
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		l.log.Info().
-			Str("kind", tr.Kind().String()).
+			Stringer("kind", tr.Kind()).
 			Str("codec", tr.Codec().MimeType).
 			Uint8("pt", uint8(tr.PayloadType())).
 			Msg("Remote track started")

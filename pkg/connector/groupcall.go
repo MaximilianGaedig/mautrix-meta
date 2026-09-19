@@ -98,6 +98,8 @@ type groupCall struct {
 	incoming bool
 	e2ee     bool
 	caller   string // incoming: who rang
+	// peerID is set for a 1:1 call on the SFU (see moveToSFU): the other user of the DM.
+	peerID string
 
 	lock           sync.Mutex
 	conference     string
@@ -187,7 +189,10 @@ func (cb *callBridge) startIncomingGroup(ctx context.Context, msg *rtcsignal.Mes
 	ring := msg.Body.RingRequest
 	log := cb.log.With().Str("conference", msg.Header.ConferenceName).Logger()
 	threadID := groupThreadOf(ring.AppMessages)
-	if threadID == "" {
+	if threadID == "" && len(ring.OtherParticipants) <= 1 {
+		cb.startIncomingSFU1to1(ctx, msg)
+		return
+	} else if threadID == "" {
 		log.Info().Int("participants", len(ring.OtherParticipants)).Msg("Group call ring without a thread, not bridging")
 		return
 	}
@@ -267,7 +272,7 @@ func (g *groupCall) canBridgeMedia() bool {
 		return false
 	}
 	go func() {
-		if _, err := g.m.frameCryptRuntime(g.ctx, g.threadID); err != nil {
+		if _, err := g.m.frameCryptRuntime(g.ctx, g.roomID()); err != nil {
 			g.log.Err(err).Msg("Failed to load the frame-encryption module")
 		}
 	}()
@@ -559,6 +564,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 		Offer:         offer,
 		SFU:           true,
 		GroupThreadID: g.threadID,
+		PeerID:        g.peerID,
 		UsersToCall:   usersToCall,
 		AudioTrackID:  leg.TrackID,
 		E2eeState:     e2eeState,
@@ -613,7 +619,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 
 func (g *groupCall) request(msg *rtcsignal.Message) {
 	if _, err := g.cb.sig.Request(g.ctx, msg); err != nil && g.ctx.Err() == nil {
-		g.log.Debug().Err(err).Str("type", msg.Header.Type.String()).Msg("Group call request failed")
+		g.log.Debug().Err(err).Stringer("type", msg.Header.Type).Msg("Group call request failed")
 	}
 }
 
@@ -774,6 +780,15 @@ func (g *groupCall) handleConferenceState(cs *rtcsignal.ConferenceStateRequest) 
 			continue
 		}
 		g.log.Debug().Str("user", userID).Int32("state", int32(ps.State)).Msg("Group call participant state")
+		if userID == g.peerID {
+			switch ps.State {
+			case rtcsignal.StateDisconnected, rtcsignal.StateConnectionDropped, rtcsignal.StateRejected,
+				rtcsignal.StateNoAnswer, rtcsignal.StateUnreachable, rtcsignal.StateInAnotherCall:
+				g.log.Info().Int32("state", int32(ps.State)).Msg("The other person left the 1:1 call")
+				go g.end("")
+				return
+			}
+		}
 		if ps.State == rtcsignal.StateDisconnected || ps.State == rtcsignal.StateConnectionDropped {
 			g.lock.Lock()
 			p := g.participants[userID]
@@ -793,7 +808,7 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 	if owner == "" {
 		owner, _, _ = strings.Cut(tr.StreamID(), ":")
 	}
-	log := g.log.With().Str("owner", owner).Str("kind", tr.Kind().String()).Logger()
+	log := g.log.With().Str("owner", owner).Stringer("kind", tr.Kind()).Logger()
 	if owner == "" || owner == strconv.FormatInt(g.m.selfFBID(), 10) {
 		log.Debug().Str("track", tr.ID()).Msg("Ignoring a group call track without another owner")
 		return
@@ -931,4 +946,112 @@ func (g *groupCall) end(notice string) {
 // isGroupPortal reports whether a portal is a group chat (calls there are group calls).
 func isGroupPortal(portal *bridgev2.Portal) bool {
 	return portal.RoomType != database.RoomTypeDM
+}
+
+// --- 1:1 calls on the SFU ---
+
+// roomID is the id of the call's Messenger room page (/groupcall/ROOM:<id>/): the group thread, or
+// the peer of a 1:1 call.
+func (g *groupCall) roomID() string {
+	if g.threadID != "" {
+		return g.threadID
+	}
+	return g.peerID
+}
+
+// moveToSFU carries on a 1:1 MatrixRTC call that Messenger put on its SFU (it does so for some calls
+// despite preventSFUMode, and when a call becomes a group call) as a group call with one other
+// participant: the session ends quietly (no HANGUP, and the user stays in the Matrix call) and a
+// group call joins the same conference as an SFU client. It reports false for a call it can't carry
+// on (legacy m.call.* calls: the group path needs MatrixRTC), which the caller then ends.
+func (cb *callBridge) moveToSFU(s *callSession) bool {
+	s.lock.Lock()
+	rtcMode, conference, serverInfo, e2ee := s.rtcMode, s.conference, s.serverInfoData, s.e2ee
+	s.lock.Unlock()
+	if !rtcMode || conference == "" {
+		return false
+	}
+	s.log.Info().Bool("e2ee", e2ee).Msg("Messenger put the call on its SFU, carrying it on as a group call")
+	s.end(endMovedToSFU, "")
+	peer := strconv.FormatInt(s.peerID, 10)
+	g, err := cb.newGroupCall(s.ctx, s.portal, "", s.incoming)
+	if err != nil {
+		s.log.Err(err).Msg("Couldn't carry the call on on the SFU")
+		return true
+	}
+	g.lock.Lock()
+	g.peerID = peer
+	g.conference = conference
+	g.serverInfoData = serverInfo
+	g.e2ee = e2ee
+	g.joining = true
+	g.lock.Unlock()
+	g.log = g.log.With().Str("peer", peer).Str("conference", conference).Logger()
+	if !g.canBridgeMedia() {
+		return true
+	}
+	go func() {
+		p, err := g.participant(peer)
+		if err == nil {
+			err = g.joinRTC(p)
+		}
+		if err != nil {
+			g.log.Err(err).Msg("Failed to put the other person back into the Matrix call")
+			g.end("")
+			return
+		}
+		g.joinMessenger(nil)
+	}()
+	return true
+}
+
+// startIncomingSFU1to1 rings Matrix for a 1:1 call that Messenger rings on its SFU (no offer, no group
+// thread): the caller's ghost joins the DM's call, like for a group call.
+func (cb *callBridge) startIncomingSFU1to1(ctx context.Context, msg *rtcsignal.Message) {
+	ring := msg.Body.RingRequest
+	log := cb.log.With().Str("conference", msg.Header.ConferenceName).Str("caller", ring.Caller).Logger()
+	caller, err := strconv.ParseInt(ring.Caller, 10, 64)
+	if err != nil || caller == 0 || caller == cb.m.selfFBID() {
+		log.Info().Msg("1:1 SFU ring without another caller, not bridging")
+		return
+	}
+	if !cb.m.matrixRTCEnabled() {
+		log.Info().Msg("1:1 SFU ring, but MatrixRTC calls are off, not bridging")
+		return
+	}
+	portal, err := cb.findDMPortal(ctx, caller)
+	if err != nil {
+		log.Info().Err(err).Msg("Not bridging 1:1 SFU call")
+		return
+	}
+	g, err := cb.newGroupCall(ctx, portal, "", true)
+	if err != nil {
+		log.Info().Err(err).Msg("Not bridging 1:1 SFU call")
+		return
+	}
+	g.lock.Lock()
+	g.peerID = ring.Caller
+	g.conference = msg.Header.ConferenceName
+	g.serverInfoData = msg.Header.ServerInfoData
+	g.caller = ring.Caller
+	g.e2ee = ring.E2eeEnforcement == nil || ring.E2eeEnforcement.Mode == rtcsignal.E2eeMandated
+	g.lock.Unlock()
+	g.log.Info().Bool("e2ee", g.e2ee).Int32("media_path", int32(ring.MediaPath)).Msg("Ringing Matrix for an incoming 1:1 call on Messenger's SFU")
+	if !g.canBridgeMedia() {
+		return
+	}
+	if err = g.ringMatrix(ring.Caller); err != nil {
+		g.log.Err(err).Msg("Failed to ring Matrix for the call")
+		g.end("")
+		return
+	}
+	time.AfterFunc(rtcRingLifetime, func() {
+		g.lock.Lock()
+		joined := g.joined || g.joining
+		g.lock.Unlock()
+		if !joined && g.ctx.Err() == nil {
+			g.log.Info().Msg("Nobody answered the call in Matrix")
+			g.end("")
+		}
+	})
 }
