@@ -107,6 +107,8 @@ type Leg struct {
 	// onRemoteTrack, when set, gets every remote track (SFU calls carry one
 	// per participant) instead of RemoteTrack/RemoteVideoTrack.
 	onRemoteTrack func(*webrtc.TrackRemote)
+	onData        func(label string, data []byte)
+	channels      map[string]*webrtc.DataChannel
 	// unappliedOffer is a mid-call offer sent but not yet answered. It is
 	// applied (SetLocalDescription) only together with its answer: Pion
 	// has no rollback, so an offer the peer rejects or talks over would
@@ -195,6 +197,7 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 		StreamID: uuid.NewString(),
 		log:      cfg.Log.With().Str("leg", cfg.Name).Logger(),
 		cfg:      cfg,
+		channels: map[string]*webrtc.DataChannel{},
 		remote:   make(chan *webrtc.TrackRemote, 1),
 		remoteV:  make(chan *webrtc.TrackRemote, 1),
 		gathered: make(chan struct{}),
@@ -297,6 +300,42 @@ func (l *Leg) AnswerDelta(update *rtcsignal.SessionDescriptionUpdate) (string, e
 		return "", err
 	}
 	return l.AnswerRenegotiation(PrepareMetaRemoteSDP(offer))
+}
+
+// OnData sets the callback for messages on the leg's data channels (Messenger's SFU sends some
+// signalling over them). It must be set before the offer.
+func (l *Leg) OnData(fn func(label string, data []byte)) {
+	l.lock.Lock()
+	l.onData = fn
+	l.lock.Unlock()
+	l.PC.OnDataChannel(l.watchDataChannel)
+}
+
+func (l *Leg) watchDataChannel(dc *webrtc.DataChannel) {
+	label := dc.Label()
+	l.lock.Lock()
+	l.channels[label] = dc
+	l.lock.Unlock()
+	dc.OnOpen(func() { l.log.Debug().Str("channel", label).Msg("Data channel open") })
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		l.lock.Lock()
+		fn := l.onData
+		l.lock.Unlock()
+		if fn != nil {
+			fn(label, msg.Data)
+		}
+	})
+}
+
+// SendData sends a message on one of the leg's data channels.
+func (l *Leg) SendData(label string, data []byte) error {
+	l.lock.Lock()
+	dc := l.channels[label]
+	l.lock.Unlock()
+	if dc == nil {
+		return fmt.Errorf("no %q data channel", label)
+	}
+	return dc.Send(data)
 }
 
 // OnCandidate sets the callback for local ICE candidates (trickle).
@@ -537,9 +576,11 @@ func (l *Leg) CreateOffer() (string, error) {
 				return "", err
 			}
 		}
-		if _, err := l.PC.CreateDataChannel("signaling_channel", nil); err != nil {
+		dc, err := l.PC.CreateDataChannel("signaling_channel", nil)
+		if err != nil {
 			return "", err
 		}
+		l.watchDataChannel(dc)
 	}
 	offer, err := l.PC.CreateOffer(nil)
 	if err != nil {

@@ -493,7 +493,8 @@ func (fl *frameLog) sample(in, out []byte) {
 	fl.lock.Lock()
 	n := fl.n
 	fl.lock.Unlock()
-	if n > 5 {
+	// The first frames, then one every few seconds, so a stream that changes mid-call shows.
+	if n > 5 && n%250 != 0 {
 		return
 	}
 	fl.log.Debug().Str("op", fl.op).Uint64("frame", n).Int("in_len", len(in)).Hex("in", in[:min(len(in), 12)]).

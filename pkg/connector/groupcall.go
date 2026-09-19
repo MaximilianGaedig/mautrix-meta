@@ -537,6 +537,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 	}
 	leg.OnRemoteTrack(g.onRemoteTrack)
 	leg.OnCandidate(g.onLocalCandidate)
+	leg.OnData(g.onLegData)
 	g.lock.Lock()
 	g.leg = leg
 	pending := g.remoteCands
@@ -633,6 +634,37 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 		g.request(cc.NewDominantSpeakerSubscription())
 		g.request(cc.NewCoplayReady())
 	}()
+}
+
+// onLegData handles what the SFU sends over the call's data channels. The server counts signalling
+// versions it never sent over the websocket (a JOIN answer at version 6 with no media updates in
+// between), so it delivers some of them here.
+func (g *groupCall) onLegData(label string, data []byte) {
+	msg, err := rtcsignal.DecodePayload(data, true)
+	if err != nil {
+		msg, err = rtcsignal.Unmarshal(data)
+	}
+	if err != nil {
+		g.log.Info().Str("channel", label).Int("len", len(data)).Hex("data", data[:min(len(data), 48)]).
+			Err(err).Msg("Data channel message the bridge can't decode")
+		return
+	}
+	g.log.Info().Str("channel", label).Stringer("type", msg.Header.Type).Int("len", len(data)).
+		Msg("Signalling message over a data channel")
+	resp := g.handleSignal(msg)
+	if resp == nil {
+		return
+	}
+	g.lock.Lock()
+	leg := g.leg
+	g.lock.Unlock()
+	out, err := rtcsignal.EncodePayload(resp)
+	if err == nil && leg != nil {
+		err = leg.SendData(label, out)
+	}
+	if err != nil {
+		g.log.Warn().Err(err).Str("channel", label).Msg("Failed to answer over the data channel")
+	}
 }
 
 func (g *groupCall) request(msg *rtcsignal.Message) {
