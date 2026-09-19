@@ -714,6 +714,7 @@ type JoinResponse struct {
 	RenegotiationOffer          *SessionDescription // 11
 	MultipleVideoStreamsAllowed bool                // 12
 	MediaPath                   MediaPath           // 13
+	GroupsOfUsers               []GroupOfUsers      // 14
 	ScreenShareStreamAllowed    bool                // 15
 	RelayInfo                   *RelayInfo          // 16
 	SelfSCTPNodeID              int64               // 17
@@ -745,6 +746,8 @@ func (m *JoinResponse) decode(r *reader) error {
 			var v int32
 			v, err = r.i32()
 			m.MediaPath = MediaPath(v)
+		case id == 14 && t == TypeList:
+			m.GroupsOfUsers, err = decodeGroupsOfUsers(r)
 		case id == 15 && isBool:
 			m.ScreenShareStreamAllowed = t == TypeTrue
 		case id == 16 && t == TypeStruct:
@@ -770,6 +773,9 @@ func (m *JoinResponse) encode(w *writer) {
 	w.optSD(11, m.RenegotiationOffer)
 	w.fieldBool(12, m.MultipleVideoStreamsAllowed)
 	w.fieldI32(13, int32(m.MediaPath))
+	if len(m.GroupsOfUsers) > 0 {
+		w.groupsOfUsers(14, m.GroupsOfUsers)
+	}
 	w.fieldBool(15, m.ScreenShareStreamAllowed)
 	if m.SelfSCTPNodeID != 0 {
 		w.fieldI64(17, m.SelfSCTPNodeID)
@@ -780,20 +786,21 @@ func (m *JoinResponse) encode(w *writer) {
 // SDP: the P2P callee's answer to the caller (tagged
 // INITIAL_ANSWER_TO_P2P_CALLER), renegotiation offers, and SFU media lists.
 type ServerMediaUpdateRequest struct {
-	FromVersion                 int64                // 1
-	ToVersion                   int64                // 2
-	Offer                       *SessionDescription  // 4
-	Answer                      *SessionDescription  // 6
-	MediaStatus                 map[string]TrackInfo // 7
-	RenegotiationRequested      bool                 // 8
-	PrAnswer                    *SessionDescription  // 9
-	StateStore                  StateStore           // 10
-	SDPOriginLocalID            string               // 11 (user id of the SDP's author)
-	MultipleVideoStreamsAllowed bool                 // 13
-	RenegotiationOffer          *SessionDescription  // 14
-	MediaPath                   MediaPath            // 15
-	ScreenShareStreamAllowed    bool                 // 17
-	RelayInfo                   *RelayInfo           // 20
+	FromVersion                 int64                     // 1
+	ToVersion                   int64                     // 2
+	Offer                       *SessionDescription       // 4
+	Answer                      *SessionDescription       // 6
+	MediaStatus                 map[string]TrackInfo      // 7
+	RenegotiationRequested      bool                      // 8
+	PrAnswer                    *SessionDescription       // 9
+	StateStore                  StateStore                // 10
+	SDPOriginLocalID            string                    // 11 (user id of the SDP's author)
+	MultipleVideoStreamsAllowed bool                      // 13
+	RenegotiationOffer          *SessionDescription       // 14
+	MediaPath                   MediaPath                 // 15
+	Update                      *SessionDescriptionUpdate // 16 (delta SDP, SFU with SUPPORT_DELTA_SMU)
+	ScreenShareStreamAllowed    bool                      // 17
+	RelayInfo                   *RelayInfo                // 20
 }
 
 func (m *ServerMediaUpdateRequest) decode(r *reader) error {
@@ -826,6 +833,8 @@ func (m *ServerMediaUpdateRequest) decode(r *reader) error {
 			var v int32
 			v, err = r.i32()
 			m.MediaPath = MediaPath(v)
+		case id == 16 && t == TypeStruct:
+			m.Update, err = decodeSessionDescriptionUpdate(r)
 		case id == 17 && isBool:
 			m.ScreenShareStreamAllowed = t == TypeTrue
 		case id == 20 && t == TypeStruct:
@@ -1345,6 +1354,9 @@ func (m *ServerMediaUpdateRequest) encode(w *writer) {
 	w.fieldBool(13, m.MultipleVideoStreamsAllowed)
 	w.optSD(14, m.RenegotiationOffer)
 	w.fieldI32(15, int32(m.MediaPath))
+	if m.Update != nil {
+		w.sessionDescriptionUpdate(16, m.Update)
+	}
 	w.fieldBool(17, m.ScreenShareStreamAllowed)
 }
 
