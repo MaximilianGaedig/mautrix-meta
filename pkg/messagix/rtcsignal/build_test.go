@@ -243,3 +243,20 @@ func TestDefaultResponses(t *testing.T) {
 		t.Errorf("ICE candidates are acked with an empty body")
 	}
 }
+
+func TestJoinLabelsVideoTrack(t *testing.T) {
+	cc := NewCallContext("100000000000001", "", "")
+	msg := cc.NewJoin(&JoinParams{Offer: "v=0", PeerID: "2", AudioTrackID: "aud", VideoTrackID: "vid"})
+	data, err := EncodePayload(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := DecodePayload(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ex := back.Body.JoinRequest.MediaStatusEx
+	if ex["aud"].Label != TrackLabelAudio || ex["vid"].Label != TrackLabelVideo || !ex["vid"].Enabled {
+		t.Fatalf("media status: %+v", ex)
+	}
+}

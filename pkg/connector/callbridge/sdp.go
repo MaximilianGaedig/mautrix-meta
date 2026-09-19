@@ -231,3 +231,32 @@ func LogSDPShape(e *zerolog.Event, sdp string) *zerolog.Event {
 	}
 	return e.Interface("sdp_shape", secs)
 }
+
+// IsPlanB reports whether an SDP uses Plan B: a media section carrying more
+// than one track (several distinct msid track ids; RTX/FEC SSRCs of one track
+// share its msid), or the Plan B section names "audio"/"video" as mids.
+func IsPlanB(sdp string) bool {
+	tracks := map[string]bool{}
+	check := func() bool { return len(tracks) > 1 }
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "m="):
+			if check() {
+				return true
+			}
+			tracks = map[string]bool{}
+		case line == "a=mid:audio" || line == "a=mid:video":
+			return true
+		case strings.HasPrefix(line, "a=msid:"):
+			if f := strings.Fields(line[len("a=msid:"):]); len(f) == 2 {
+				tracks[f[1]] = true
+			}
+		case strings.HasPrefix(line, "a=ssrc:") && strings.Contains(line, " msid:"):
+			if f := strings.Fields(line[strings.Index(line, " msid:")+len(" msid:"):]); len(f) == 2 {
+				tracks[f[1]] = true
+			}
+		}
+	}
+	return check()
+}

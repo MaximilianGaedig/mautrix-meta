@@ -303,6 +303,12 @@ type callSession struct {
 	endOnce sync.Once
 }
 
+func (s *callSession) ringOfferSDP() string {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	return s.ringOffer
+}
+
 func (s *callSession) serverInfo() string {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -1078,6 +1084,8 @@ func (s *callSession) relayVideo(from, to *callbridge.Leg) {
 func (s *callSession) newMetaLeg() (*callbridge.Leg, error) {
 	leg, err := callbridge.NewLeg(callbridge.LegConfig{
 		Name: "messenger", ICEServers: s.metaICEServers(), WebShape: true, VideoCodec: s.videoCodec, Log: s.log,
+		// Only an incoming ring's offer can be Plan B; our own offers are Unified Plan.
+		PlanB: s.incoming && callbridge.IsPlanB(s.ringOfferSDP()),
 	})
 	if err != nil {
 		return nil, err

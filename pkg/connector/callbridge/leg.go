@@ -50,6 +50,12 @@ type LegConfig struct {
 	// video transceiver and a data channel to offers, so an offer has the
 	// same m-lines (audio, video, application) as facebook.com's.
 	WebShape bool
+	// PlanB creates the PeerConnection with Plan B semantics, for answering a
+	// Plan B offer (Messenger's mobile apps); see IsPlanB. Everything else is
+	// Unified Plan. Pion's "Unified Plan with fallback" is not used: it guesses
+	// Plan B from Unified Plan descriptions too and then crashes reading a
+	// track whose stream was never set up (RTPReceiver.readRTP nil deref).
+	PlanB bool
 	// VideoCodec is the video codec (webrtc.MimeTypeVP8 or MimeTypeH264)
 	// this leg sends and receives, or "" for an audio call. Both legs of a
 	// call use the same one, so video is relayed without transcoding. Only
@@ -144,11 +150,8 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	}
 	api := webrtc.NewAPI(opts...)
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
-		ICEServers: cfg.ICEServers,
-		// Messenger's mobile apps still offer Plan B SDP (one m-line per
-		// kind, tracks as a=ssrc groups); the web client and Element use
-		// Unified Plan. Answer whichever the peer offers.
-		SDPSemantics:  webrtc.SDPSemanticsUnifiedPlanWithFallback,
+		ICEServers:    cfg.ICEServers,
+		SDPSemantics:  semantics(cfg.PlanB),
 		BundlePolicy:  webrtc.BundlePolicyMaxBundle,
 		RTCPMuxPolicy: webrtc.RTCPMuxPolicyRequire,
 	})
@@ -466,4 +469,11 @@ func (l *Leg) Close() {
 	if err := l.PC.Close(); err != nil {
 		l.log.Debug().Err(err).Msg("Error closing PeerConnection")
 	}
+}
+
+func semantics(planB bool) webrtc.SDPSemantics {
+	if planB {
+		return webrtc.SDPSemanticsPlanB
+	}
+	return webrtc.SDPSemanticsUnifiedPlan
 }

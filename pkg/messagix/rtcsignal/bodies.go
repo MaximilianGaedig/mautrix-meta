@@ -251,6 +251,12 @@ func (w *writer) dataMessages(id int16, msgs []DataMessage) {
 	}
 }
 
+// ClientTrackInfo.label values seen in the server's media status.
+const (
+	TrackLabelAudio int32 = 0
+	TrackLabelVideo int32 = 1
+)
+
 // TrackInfo is ClientTrackInfo (ClientMediaStatus.tracks value).
 type TrackInfo struct {
 	Enabled                bool   // 1

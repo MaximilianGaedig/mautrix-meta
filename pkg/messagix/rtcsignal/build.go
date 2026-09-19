@@ -200,11 +200,16 @@ func (c *CallContext) NewJoin(p *JoinParams) *Message {
 	if jr.UsersToCall == nil {
 		jr.UsersToCall = []string{}
 	}
-	for _, id := range []string{p.AudioTrackID, p.VideoTrackID} {
-		if id != "" {
-			jr.MediaStatus[id] = true
-			jr.MediaStatusEx[id] = TrackInfo{Enabled: true}
-		}
+	// ClientTrackInfo.label is the track's media type, as in the server's
+	// media status for the peer's tracks: 0 audio, 1 video. An unlabelled
+	// video track reads as audio, and the peer never renders it.
+	if p.AudioTrackID != "" {
+		jr.MediaStatus[p.AudioTrackID] = true
+		jr.MediaStatusEx[p.AudioTrackID] = TrackInfo{Enabled: true, Label: TrackLabelAudio}
+	}
+	if p.VideoTrackID != "" {
+		jr.MediaStatus[p.VideoTrackID] = true
+		jr.MediaStatusEx[p.VideoTrackID] = TrackInfo{Enabled: true, Label: TrackLabelVideo}
 	}
 	if p.Answer != "" {
 		jr.Answer = &SessionDescription{SDP: p.Answer}

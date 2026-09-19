@@ -433,7 +433,14 @@ func TestPlanBOffer(t *testing.T) {
 	if !strings.Contains(peer.LocalDescription().SDP, "a=ssrc:") {
 		t.Fatal("test offer isn't Plan B")
 	}
-	leg := newTestLeg(t, "meta", 111, true)
+	if !IsPlanB(peer.LocalDescription().SDP) {
+		t.Fatal("IsPlanB missed a Plan B offer")
+	}
+	leg, err := NewLeg(LegConfig{Name: "meta", WebShape: true, PlanB: true, Settings: loopbackSettings(), Log: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(leg.Close)
 	if _, err = leg.AnswerOffer(peer.LocalDescription().SDP); err != nil {
 		t.Fatalf("answering a Plan B offer: %v", err)
 	}
@@ -494,5 +501,20 @@ func TestLogSDPShapeHasNoSecrets(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("shape log misses %q: %s", want, out)
 		}
+	}
+}
+
+func TestIsPlanB(t *testing.T) {
+	unified := "v=0\r\nm=audio 9 X 111\r\na=mid:0\r\na=msid:s a\r\na=ssrc:1 msid:s a\r\n" +
+		"m=video 9 X 96 97\r\na=mid:1\r\na=msid:s v\r\na=ssrc-group:FID 2 3\r\na=ssrc:2 msid:s v\r\na=ssrc:3 msid:s v\r\n"
+	if IsPlanB(unified) {
+		t.Fatal("Unified Plan with an RTX SSRC group taken for Plan B")
+	}
+	if !IsPlanB("m=audio 9 X 111\r\na=mid:audio\r\n") {
+		t.Fatal("Plan B mid names not detected")
+	}
+	twoTracks := "m=audio 9 X 111\r\na=mid:0\r\na=ssrc:1 msid:s a\r\na=ssrc:2 msid:s b\r\n"
+	if !IsPlanB(twoTracks) {
+		t.Fatal("two tracks in one section not detected")
 	}
 }
