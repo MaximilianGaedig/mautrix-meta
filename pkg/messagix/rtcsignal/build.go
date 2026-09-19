@@ -140,7 +140,7 @@ type JoiningContext struct {
 	LinkURL         *string `json:"link_url"`
 	LiveBroadcastID *string `json:"live_broadcast_id"`
 	MeetingID       *string `json:"meeting_id"`
-	PeerID          string  `json:"peer_id"`
+	PeerID          *string `json:"peer_id"`
 	ServerInfoData  *string `json:"server_info_data"`
 }
 
@@ -161,6 +161,12 @@ type JoinParams struct {
 	E2eeState []byte
 	// E2eeMandated is true for end-to-end encrypted threads.
 	E2eeMandated bool
+	// SFU joins as a group-call (MW) client: clientMediaMode SFU with our full offer in field 1 (the
+	// client is the offerer; the SFU answers in the JoinResponse and adds participants later with delta
+	// SERVER_MEDIA_UPDATEs), per ZenonMWThriftJoinTranslator.toThriftJoinRequest.
+	SFU bool
+	// GroupThreadID is the group thread of a group call (joining_context group_thread_id; peer_id null).
+	GroupThreadID string
 	// PreventSFU asks the server to keep the call peer-to-peer (E2eeEnforcement.preventSFUMode) rather
 	// than moving it to its SFU, which needs SFrame frame encryption the bridge doesn't do.
 	PreventSFU bool
@@ -180,7 +186,12 @@ func (c *CallContext) NewJoin(p *JoinParams) *Message {
 	if c.ServerInfoData != "" {
 		sid = &c.ServerInfoData
 	}
-	jc := JoiningContext{CallingTags: 2, PeerID: p.PeerID, ServerInfoData: sid}
+	jc := JoiningContext{CallingTags: 2, ServerInfoData: sid}
+	if p.GroupThreadID != "" {
+		jc.GroupThreadID = &p.GroupThreadID
+	} else {
+		jc.PeerID = &p.PeerID
+	}
 	if !p.E2eeMandated {
 		jc.CallingTags = 0
 	}
@@ -202,6 +213,9 @@ func (c *CallContext) NewJoin(p *JoinParams) *Message {
 	}
 	if jr.UsersToCall == nil {
 		jr.UsersToCall = []string{}
+	}
+	if p.SFU {
+		jr.ClientMediaMode = int32(MediaPathSFU)
 	}
 	// ClientTrackInfo.label is the track's media type, as in the server's
 	// media status for the peer's tracks: 0 audio, 1 video. An unlabelled

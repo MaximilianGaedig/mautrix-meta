@@ -100,3 +100,23 @@ func TestSFUDeltaHAR(t *testing.T) {
 		t.Fatalf("capture lacks an SFU join (%t) or a delta SMU (%t)", sawJoin, sawDelta)
 	}
 }
+
+func TestNewJoinSFU(t *testing.T) {
+	cc := &CallContext{}
+	msg := cc.NewJoin(&JoinParams{Offer: "v=0\r\n", SFU: true, GroupThreadID: "123456", E2eeMandated: true})
+	jr := msg.Body.JoinRequest
+	if jr.ClientMediaMode != int32(MediaPathSFU) || jr.Offer == nil || jr.Offer.SDP == "" {
+		t.Fatalf("SFU join: mode %d offer %v", jr.ClientMediaMode, jr.Offer)
+	}
+	if jr.E2eeEnforcement == nil || jr.E2eeEnforcement.PreventSFUMode {
+		t.Fatalf("SFU join must not ask to prevent the SFU: %+v", jr.E2eeEnforcement)
+	}
+	jc := string(jr.AppMessages[0].Data)
+	if !strings.Contains(jc, `"group_thread_id":"123456"`) || !strings.Contains(jc, `"peer_id":null`) {
+		t.Fatalf("joining_context %s", jc)
+	}
+	p2p := string(cc.NewJoin(&JoinParams{PeerID: "42"}).Body.JoinRequest.AppMessages[0].Data)
+	if !strings.Contains(p2p, `"peer_id":"42"`) || !strings.Contains(p2p, `"group_thread_id":null`) {
+		t.Fatalf("P2P joining_context changed: %s", p2p)
+	}
+}
