@@ -345,12 +345,11 @@ func (b *PreKeyBundle) VerifySignedPreKey() (bool, error) {
 
 // DtlsAuthInfo is the DtlsAuthenticationInfo carried base64 (standard, with
 // padding) in the "a=x-dtls-auth:" SDP session attribute. The signature is an
-// XEdDSA signature by the identity key over a message derived from the DTLS
-// fingerprint; the exact message layout is computed inside the WASM
-// (context string "dtls_authentication_context") and is not known yet.
+// XEdDSA signature by the device's Signal identity key over DtlsAuthMessage;
+// see SignDTLSAuth and VerifyDTLSAuth.
 type DtlsAuthInfo struct {
 	ProtocolVersion int32  // 1 (1 in the capture)
-	IdentityKeyMode int16  // 2.1 (2 in the capture)
+	IdentityKeyMode int16  // 2.1 (2 = USE_PERSISTENT_IDENTITY_KEYS_AND_VALIDATE)
 	DeviceID        int32  // 2.2, Signal device id
 	PublicKey       []byte // 2.3, 33-byte identity key
 	Signature       []byte // 3, 64 bytes
