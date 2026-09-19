@@ -110,7 +110,7 @@ func TestWebShapedSDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed, err := PrepareMetaLocalSDP(answer, id)
+	signed, err := PrepareMetaLocalSDP(answer, id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestWebShapedSDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	offer, err = PrepareMetaLocalSDP(offer, id)
+	offer, err = PrepareMetaLocalSDP(offer, id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,5 +300,177 @@ func TestLoopbackRelay(t *testing.T) {
 	expect(peerA, 111, "B", senderSSRC(peerB))
 	if statsAB.Forwarded.Load() == 0 || statsBA.Forwarded.Load() == 0 {
 		t.Fatalf("relay stats: A->B %d, B->A %d", statsAB.Forwarded.Load(), statsBA.Forwarded.Load())
+	}
+}
+
+func newVideoTestLeg(t *testing.T, name string, webShape bool) *Leg {
+	t.Helper()
+	l, err := NewLeg(LegConfig{
+		Name: name, WebShape: webShape, VideoCodec: webrtc.MimeTypeVP8, Settings: loopbackSettings(), Log: zerolog.Nop(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Close)
+	return l
+}
+
+// TestLoopbackVideoRelay relays VP8 both ways through the two legs and checks
+// that a keyframe request from one peer reaches the leg facing the other.
+func TestLoopbackVideoRelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	log := zerolog.Nop()
+	peerA := newVideoTestLeg(t, "peerA", true)
+	metaLeg := newVideoTestLeg(t, "meta", true)
+	mxLeg := newVideoTestLeg(t, "matrix", false)
+	peerB := newVideoTestLeg(t, "peerB", false)
+	connect(t, ctx, peerA, metaLeg)
+	connect(t, ctx, mxLeg, peerB)
+	if !SendsVideo(metaLeg.PC.LocalDescription().SDP) || !SendsVideo(mxLeg.PC.LocalDescription().SDP) {
+		t.Fatal("bridge legs don't send video")
+	}
+
+	send := func(l *Leg, tag string) {
+		go func() {
+			ticker := time.NewTicker(33 * time.Millisecond)
+			defer ticker.Stop()
+			for i := uint16(0); ; i++ {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+				_ = l.LocalVideo.WriteRTP(&rtp.Packet{
+					Header:  rtp.Header{Version: 2, SequenceNumber: 500 + i, Timestamp: uint32(i) * VideoFrameTicks, Marker: true},
+					Payload: fmt.Appendf(nil, "%s-vp8-%d", tag, i),
+				})
+			}
+		}()
+	}
+	send(peerA, "A")
+	send(peerB, "B")
+	keyframeRequested := make(chan struct{}, 1)
+	mxLeg.OnKeyframeRequest(func() {
+		select {
+		case keyframeRequested <- struct{}{}:
+		default:
+		}
+	})
+	for _, dir := range [][2]*Leg{{metaLeg, mxLeg}, {mxLeg, metaLeg}} {
+		go func() {
+			tr, err := dir[0].RemoteVideoTrack(ctx)
+			if err != nil {
+				return
+			}
+			var stats RelayStats
+			_ = RelayVideo(ctx, tr, uint8(tr.PayloadType()), dir[1].LocalVideo, &stats, log)
+		}()
+	}
+	expect := func(receiver *Leg, tag string) *webrtc.TrackRemote {
+		t.Helper()
+		tr, err := receiver.RemoteVideoTrack(ctx)
+		if err != nil {
+			t.Fatalf("%s: %v", receiver.Name, err)
+		}
+		if tr.Codec().MimeType != webrtc.MimeTypeVP8 {
+			t.Fatalf("%s: codec %s", receiver.Name, tr.Codec().MimeType)
+		}
+		for got := 0; got < 5; {
+			p, _, err := tr.ReadRTP()
+			if err != nil {
+				t.Fatalf("%s: read: %v", receiver.Name, err)
+			}
+			if bytes.HasPrefix(p.Payload, []byte(tag+"-vp8-")) {
+				got++
+			}
+		}
+		return tr
+	}
+	trB := expect(peerB, "A")
+	expect(peerA, "B")
+	peerB.RequestKeyframe(trB.SSRC())
+	select {
+	case <-keyframeRequested:
+	case <-ctx.Done():
+		t.Fatal("keyframe request from peer B didn't reach the matrix leg")
+	}
+}
+
+// TestPlanBOffer answers a Plan B offer, as Messenger's mobile apps send.
+func TestPlanBOffer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(*loopbackSettings()))
+	peer, err := api.NewPeerConnection(webrtc.Configuration{SDPSemantics: webrtc.SDPSemanticsPlanB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	track, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2}, "a", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two tracks in one m-section is what makes an offer (certainly) Plan B.
+	track2, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2}, "b", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tr := range []webrtc.TrackLocal{track, track2} {
+		if _, err = peer.AddTrack(tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	offer, err := peer.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered := webrtc.GatheringCompletePromise(peer)
+	if err = peer.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-gathered
+	if !strings.Contains(peer.LocalDescription().SDP, "a=ssrc:") {
+		t.Fatal("test offer isn't Plan B")
+	}
+	leg := newTestLeg(t, "meta", 111, true)
+	if _, err = leg.AnswerOffer(peer.LocalDescription().SDP); err != nil {
+		t.Fatalf("answering a Plan B offer: %v", err)
+	}
+	answer := leg.WaitGathering(ctx, 5*time.Second)
+	if err = peer.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for i := uint16(0); ctx.Err() == nil; i++ {
+			_ = track.WriteRTP(&rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: i, Timestamp: uint32(i) * 960}, Payload: []byte("planb")})
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	tr, err := leg.RemoteTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _, err := tr.ReadRTP(); err != nil || string(p.Payload) != "planb" {
+		t.Fatalf("read: %v %v", p, err)
+	}
+}
+
+func TestVideoSDPHelpers(t *testing.T) {
+	web := "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\na=sendrecv\r\n" +
+		"m=video 9 UDP/TLS/RTP/SAVPF 108 96\r\na=rtpmap:108 H264/90000\r\na=rtpmap:96 VP8/90000\r\na=sendrecv\r\n"
+	if PickVideoCodec(web) != webrtc.MimeTypeVP8 || !SendsVideo(web) {
+		t.Fatal("web video offer")
+	}
+	h264 := strings.Replace(web, "a=rtpmap:96 VP8/90000\r\n", "", 1)
+	if PickVideoCodec(h264) != webrtc.MimeTypeH264 {
+		t.Fatal("H264-only offer")
+	}
+	voice := strings.TrimSuffix(web, "a=sendrecv\r\n") + "a=recvonly\r\n"
+	if SendsVideo(voice) {
+		t.Fatal("recvonly video counted as sending")
+	}
+	if SendsVideo("v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n") || PickVideoCodec("m=video 0 RTP 96\r\na=rtpmap:96 VP8/90000\r\n") != "" {
+		t.Fatal("audio-only / disabled video")
 	}
 }

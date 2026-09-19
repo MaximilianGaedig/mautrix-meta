@@ -231,8 +231,10 @@ type callSession struct {
 	incoming bool
 	peerID   int64
 	e2ee     bool
-	portal   *bridgev2.Portal
-	ghost    bridgev2.MatrixAPI
+	// videoCodec is the codec both legs send video with, "" for audio calls.
+	videoCodec string
+	portal     *bridgev2.Portal
+	ghost      bridgev2.MatrixAPI
 
 	// Messenger side
 	lock           sync.Mutex
@@ -430,7 +432,7 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		// A renegotiation: answer it in the SMU response.
 		answer, err := leg.AnswerOffer(callbridge.PrepareMetaRemoteSDP(sd.SDP))
 		if err == nil {
-			answer, err = callbridge.PrepareMetaLocalSDP(answer, s.m.callIdentity())
+			answer, err = callbridge.PrepareMetaLocalSDP(answer, s.m.callIdentity(), s.videoCodec != "")
 		}
 		if err != nil {
 			s.log.Err(err).Msg("Failed to answer Messenger renegotiation")
@@ -715,10 +717,15 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 	s.serverInfoData = msg.Header.ServerInfoData
 	s.ringOffer = ring.Offer.SDP
 	s.ringRelay = ring.RelayInfo
+	if ring.RingType == rtcsignal.RingPeerVideo || callbridge.SendsVideo(ring.Offer.SDP) {
+		s.videoCodec = callbridge.PickVideoCodec(ring.Offer.SDP)
+	}
 	s.e2ee = ring.E2eeEnforcement == nil || ring.E2eeEnforcement.Mode == rtcsignal.E2eeMandated
 	s.lock.Unlock()
 	s.log.Info().
 		Int32("media_path", int32(ring.MediaPath)).
+		Int32("ring_type", int32(ring.RingType)).
+		Str("video_codec", s.videoCodec).
 		Bool("e2ee", s.e2ee).
 		Bool("relay_info", ring.RelayInfo != nil).
 		Int16("retry", msg.Header.RetryCount).
@@ -742,7 +749,7 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 		s.lock.Lock()
 		answered := s.mxAnswered
 		s.lock.Unlock()
-		if !answered {
+		if !answered && s.ctx.Err() == nil {
 			s.log.Info().Msg("Nobody answered in Matrix")
 			s.end(endTimeout, "")
 		}
@@ -752,7 +759,9 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 // ringMatrix creates the Matrix leg and sends m.call.invite from the
 // caller's ghost.
 func (s *callSession) ringMatrix() error {
-	leg, err := callbridge.NewLeg(callbridge.LegConfig{Name: "matrix", ICEServers: s.matrixICEServers(), Log: s.log})
+	leg, err := callbridge.NewLeg(callbridge.LegConfig{
+		Name: "matrix", ICEServers: s.matrixICEServers(), VideoCodec: s.videoCodec, Log: s.log,
+	})
 	if err != nil {
 		return err
 	}
@@ -907,6 +916,10 @@ func (s *callSession) startRelay() {
 	}
 	go relay(metaLeg, mxLeg)
 	go relay(mxLeg, metaLeg)
+	if metaLeg.LocalVideo != nil && mxLeg.LocalVideo != nil {
+		go s.relayVideo(metaLeg, mxLeg)
+		go s.relayVideo(mxLeg, metaLeg)
+	}
 	time.AfterFunc(callSetupTimeout, func() {
 		if !s.mediaConnected.Load() && s.ctx.Err() == nil {
 			s.log.Warn().Msg("Messenger media didn't connect in time")
@@ -915,10 +928,49 @@ func (s *callSession) startRelay() {
 	})
 }
 
+// relayVideo forwards one direction of video and passes the receiver's
+// keyframe requests back to the sender. A keyframe is also requested a few
+// times at the start, so the picture appears without waiting for the
+// sender's next periodic keyframe.
+func (s *callSession) relayVideo(from, to *callbridge.Leg) {
+	tr, err := from.RemoteVideoTrack(s.ctx)
+	if err != nil {
+		if s.ctx.Err() == nil {
+			s.log.Debug().Err(err).Str("from", from.Name).Msg("No remote video")
+		}
+		return
+	}
+	ssrc := tr.SSRC()
+	var lastPLI atomic.Int64
+	requestKeyframe := func() {
+		// At most one PLI per 500 ms towards the sender.
+		now := time.Now().UnixMilli()
+		if last := lastPLI.Load(); now-last < 500 || !lastPLI.CompareAndSwap(last, now) {
+			return
+		}
+		from.RequestKeyframe(ssrc)
+	}
+	to.OnKeyframeRequest(requestKeyframe)
+	for _, d := range []time.Duration{0, time.Second, 3 * time.Second} {
+		time.AfterFunc(d, func() {
+			if s.ctx.Err() == nil {
+				requestKeyframe()
+			}
+		})
+	}
+	var stats callbridge.RelayStats
+	rlog := s.log.With().Str("from", from.Name).Str("to", to.Name).Str("codec", tr.Codec().MimeType).Logger()
+	err = callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), to.LocalVideo, &stats, rlog)
+	rlog.Info().AnErr("relay_err", err).
+		Uint64("forwarded", stats.Forwarded.Load()).
+		Uint64("dropped", stats.Dropped.Load()).
+		Msg("Video relay stopped")
+}
+
 // newMetaLeg creates the Messenger PeerConnection with Messenger's TURN.
 func (s *callSession) newMetaLeg() (*callbridge.Leg, error) {
 	leg, err := callbridge.NewLeg(callbridge.LegConfig{
-		Name: "messenger", ICEServers: s.metaICEServers(), WebShape: true, Log: s.log,
+		Name: "messenger", ICEServers: s.metaICEServers(), WebShape: true, VideoCodec: s.videoCodec, Log: s.log,
 	})
 	if err != nil {
 		return nil, err
@@ -1013,7 +1065,7 @@ func (s *callSession) buildMessengerAnswer() (string, error) {
 	s.lock.Unlock()
 	answer, err := leg.AnswerOffer(callbridge.PrepareMetaRemoteSDP(offer))
 	if err == nil {
-		answer, err = callbridge.PrepareMetaLocalSDP(answer, id)
+		answer, err = callbridge.PrepareMetaLocalSDP(answer, id, s.videoCodec != "")
 	}
 	if err != nil {
 		return "", fmt.Errorf("create Messenger answer: %w", err)
@@ -1045,6 +1097,7 @@ func (s *callSession) answerMessenger() {
 		Answer:       answer,
 		PeerID:       strconv.FormatInt(s.peerID, 10),
 		AudioTrackID: leg.TrackID,
+		VideoTrackID: leg.VideoTrackID,
 		E2eeState:    s.m.callE2eeState(),
 		E2eeMandated: s.e2ee,
 	}); err != nil {
@@ -1100,8 +1153,11 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 	s.lock.Lock()
 	s.e2ee = meta.WhatsAppServer != ""
 	s.mxRemoteParty = inv.PartyID
+	if callbridge.SendsVideo(inv.Offer.SDP) {
+		s.videoCodec = callbridge.PickVideoCodec(inv.Offer.SDP)
+	}
 	s.lock.Unlock()
-	s.log.Info().Bool("e2ee", s.e2ee).Msg("Outgoing call from Matrix")
+	s.log.Info().Bool("e2ee", s.e2ee).Str("video_codec", s.videoCodec).Msg("Outgoing call from Matrix")
 	id := s.m.callIdentity()
 	if id == nil {
 		s.end(endFailed, "The bridge has no Messenger encryption device, so it can't place calls")
@@ -1109,7 +1165,9 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 	}
 	// Matrix leg: answer Element's offer now, send the answer when the
 	// Messenger peer picks up.
-	mxLeg, err := callbridge.NewLeg(callbridge.LegConfig{Name: "matrix", ICEServers: s.matrixICEServers(), Log: s.log})
+	mxLeg, err := callbridge.NewLeg(callbridge.LegConfig{
+		Name: "matrix", ICEServers: s.matrixICEServers(), VideoCodec: s.videoCodec, Log: s.log,
+	})
 	if err != nil {
 		s.log.Err(err).Msg("Failed to create Matrix PeerConnection")
 		s.end(endFailed, "")
@@ -1138,7 +1196,7 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 	}
 	offer, err := metaLeg.CreateOffer()
 	if err == nil {
-		offer, err = callbridge.PrepareMetaLocalSDP(offer, id)
+		offer, err = callbridge.PrepareMetaLocalSDP(offer, id, s.videoCodec != "")
 	}
 	if err != nil {
 		s.log.Err(err).Msg("Failed to create Messenger offer")
@@ -1152,6 +1210,7 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 		PeerID:       peer,
 		UsersToCall:  []string{peer},
 		AudioTrackID: metaLeg.TrackID,
+		VideoTrackID: metaLeg.VideoTrackID,
 		E2eeState:    s.m.callE2eeState(),
 		E2eeMandated: s.e2ee,
 	}); err != nil {
@@ -1167,7 +1226,7 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 		s.lock.Lock()
 		answered := s.metaAnswered
 		s.lock.Unlock()
-		if !answered {
+		if !answered && s.ctx.Err() == nil {
 			s.log.Info().Msg("Messenger peer didn't answer")
 			s.end(endTimeout, "")
 		}

@@ -28,6 +28,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
 )
@@ -49,6 +50,11 @@ type LegConfig struct {
 	// video transceiver and a data channel to offers, so an offer has the
 	// same m-lines (audio, video, application) as facebook.com's.
 	WebShape bool
+	// VideoCodec is the video codec (webrtc.MimeTypeVP8 or MimeTypeH264)
+	// this leg sends and receives, or "" for an audio call. Both legs of a
+	// call use the same one, so video is relayed without transcoding. Only
+	// that codec is registered, which forces the negotiation.
+	VideoCodec string
 	// Settings optionally overrides the Pion setting engine (tests use it to
 	// restrict ICE to loopback).
 	Settings *webrtc.SettingEngine
@@ -62,15 +68,23 @@ type Leg struct {
 	Local *webrtc.TrackLocalStaticRTP
 	// TrackID and StreamID are the msid of Local.
 	TrackID, StreamID string
+	// LocalVideo is the video track relayed to this leg (nil for audio
+	// calls), VideoTrackID its msid track id.
+	LocalVideo   *webrtc.TrackLocalStaticRTP
+	VideoTrackID string
 
-	log      zerolog.Logger
-	cfg      LegConfig
-	sender   *webrtc.RTPSender
-	remote   chan *webrtc.TrackRemote
-	lock     sync.Mutex
-	pending  []webrtc.ICECandidateInit
-	haveDesc bool
-	closed   bool
+	log     zerolog.Logger
+	cfg     LegConfig
+	sender  *webrtc.RTPSender
+	vsender *webrtc.RTPSender
+	remote  chan *webrtc.TrackRemote
+	remoteV chan *webrtc.TrackRemote
+
+	onKeyframeRequest func()
+	lock              sync.Mutex
+	pending           []webrtc.ICECandidateInit
+	haveDesc          bool
+	closed            bool
 
 	onCandidate func(*webrtc.ICECandidateInit)
 	onState     func(webrtc.PeerConnectionState)
@@ -92,13 +106,11 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
-	if cfg.WebShape {
-		videoFB := []webrtc.RTCPFeedback{{Type: "goog-remb"}, {Type: "ccm", Parameter: "fir"}, {Type: "nack"}, {Type: "nack", Parameter: "pli"}}
-		for _, c := range []webrtc.RTPCodecParameters{
-			{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000,
-				SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f", RTCPFeedback: videoFB}, PayloadType: 108},
-			{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000, RTCPFeedback: videoFB}, PayloadType: 96},
-		} {
+	if cfg.WebShape || cfg.VideoCodec != "" {
+		for _, c := range videoCodecs {
+			if cfg.VideoCodec != "" && c.MimeType != cfg.VideoCodec {
+				continue
+			}
 			if err := me.RegisterCodec(c, webrtc.RTPCodecTypeVideo); err != nil {
 				return nil, err
 			}
@@ -126,7 +138,11 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	}
 	api := webrtc.NewAPI(opts...)
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
-		ICEServers:    cfg.ICEServers,
+		ICEServers: cfg.ICEServers,
+		// Messenger's mobile apps still offer Plan B SDP (one m-line per
+		// kind, tracks as a=ssrc groups); the web client and Element use
+		// Unified Plan. Answer whichever the peer offers.
+		SDPSemantics:  webrtc.SDPSemanticsUnifiedPlanWithFallback,
 		BundlePolicy:  webrtc.BundlePolicyMaxBundle,
 		RTCPMuxPolicy: webrtc.RTCPMuxPolicyRequire,
 	})
@@ -141,6 +157,7 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 		log:      cfg.Log.With().Str("leg", cfg.Name).Logger(),
 		cfg:      cfg,
 		remote:   make(chan *webrtc.TrackRemote, 1),
+		remoteV:  make(chan *webrtc.TrackRemote, 1),
 		gathered: make(chan struct{}),
 	}
 	l.Local, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
@@ -149,6 +166,15 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	if err != nil {
 		_ = pc.Close()
 		return nil, err
+	}
+	if cfg.VideoCodec != "" {
+		vcap := videoCapability(cfg.VideoCodec)
+		l.VideoTrackID = uuid.NewString()
+		l.LocalVideo, err = webrtc.NewTrackLocalStaticRTP(vcap, l.VideoTrackID, l.StreamID)
+		if err != nil {
+			_ = pc.Close()
+			return nil, err
+		}
 	}
 	var gatherOnce sync.Once
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -185,11 +211,12 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 			Str("codec", tr.Codec().MimeType).
 			Uint8("pt", uint8(tr.PayloadType())).
 			Msg("Remote track started")
-		if tr.Kind() != webrtc.RTPCodecTypeAudio {
-			return
+		ch := l.remote
+		if tr.Kind() == webrtc.RTPCodecTypeVideo {
+			ch = l.remoteV
 		}
 		select {
-		case l.remote <- tr:
+		case ch <- tr:
 		default:
 		}
 	})
@@ -228,7 +255,79 @@ func (l *Leg) addLocalTrack() error {
 			}
 		}
 	}()
+	if l.LocalVideo != nil {
+		vsender, err := l.PC.AddTrack(l.LocalVideo)
+		if err != nil {
+			return err
+		}
+		l.vsender = vsender
+		go l.readVideoRTCP(vsender)
+	}
 	return nil
+}
+
+// readVideoRTCP drains the video sender's RTCP and reports the receiver's
+// keyframe requests (PLI/FIR), which the relay passes on to the sending peer.
+func (l *Leg) readVideoRTCP(sender *webrtc.RTPSender) {
+	for {
+		pkts, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		for _, p := range pkts {
+			switch p.(type) {
+			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				l.lock.Lock()
+				cb := l.onKeyframeRequest
+				l.lock.Unlock()
+				if cb != nil {
+					cb()
+				}
+			}
+		}
+	}
+}
+
+// OnKeyframeRequest sets the callback for keyframe requests from this leg's
+// peer about the video we send it.
+func (l *Leg) OnKeyframeRequest(fn func()) {
+	l.lock.Lock()
+	l.onKeyframeRequest = fn
+	l.lock.Unlock()
+}
+
+// RequestKeyframe asks this leg's peer for a keyframe of its video.
+func (l *Leg) RequestKeyframe(ssrc webrtc.SSRC) {
+	_ = l.PC.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(ssrc)}})
+}
+
+// RemoteVideoTrack waits for the peer's video track.
+func (l *Leg) RemoteVideoTrack(ctx context.Context) (*webrtc.TrackRemote, error) {
+	select {
+	case tr := <-l.remoteV:
+		return tr, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("callbridge: no remote video track: %w", ctx.Err())
+	}
+}
+
+var videoFeedback = []webrtc.RTCPFeedback{
+	{Type: "goog-remb"}, {Type: "ccm", Parameter: "fir"}, {Type: "nack"}, {Type: "nack", Parameter: "pli"},
+}
+
+// videoCodecs are the web client's video codecs (H264 first, as it offers
+// them), with its payload types.
+var videoCodecs = []webrtc.RTPCodecParameters{
+	{RTPCodecCapability: videoCapability(webrtc.MimeTypeH264), PayloadType: 108},
+	{RTPCodecCapability: videoCapability(webrtc.MimeTypeVP8), PayloadType: 96},
+}
+
+func videoCapability(mime string) webrtc.RTPCodecCapability {
+	c := webrtc.RTPCodecCapability{MimeType: mime, ClockRate: 90000, RTCPFeedback: videoFeedback}
+	if mime == webrtc.MimeTypeH264 {
+		c.SDPFmtpLine = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+	}
+	return c
 }
 
 // CreateOffer makes and applies a local offer: audio sendrecv, plus for
@@ -238,10 +337,12 @@ func (l *Leg) CreateOffer() (string, error) {
 		return "", err
 	}
 	if l.cfg.WebShape {
-		if _, err := l.PC.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
-			Direction: webrtc.RTPTransceiverDirectionRecvonly,
-		}); err != nil {
-			return "", err
+		if l.LocalVideo == nil {
+			if _, err := l.PC.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+				Direction: webrtc.RTPTransceiverDirectionRecvonly,
+			}); err != nil {
+				return "", err
+			}
 		}
 		if _, err := l.PC.CreateDataChannel("signaling_channel", nil); err != nil {
 			return "", err

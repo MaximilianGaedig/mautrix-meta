@@ -45,6 +45,10 @@ type RTPWriter interface {
 // changes (e.g. after a peer renegotiates), so the receiver sees one
 // monotonic stream. SSRC and payload type are replaced by the writer.
 type Rewriter struct {
+	// FrameTicks spaces the first packet of a new source after the last one
+	// of the old source; 0 means one 20 ms Opus frame.
+	FrameTicks uint32
+
 	started    bool
 	inSSRC     uint32
 	seqOffset  uint16
@@ -70,7 +74,11 @@ func (r *Rewriter) Rewrite(p *rtp.Packet) {
 	} else if p.SSRC != r.inSSRC {
 		r.inSSRC = p.SSRC
 		r.seqOffset = r.lastOutSeq + 1 - p.SequenceNumber
-		r.tsOffset = r.lastOutTS + opusFrameTicks - p.Timestamp
+		ticks := r.FrameTicks
+		if ticks == 0 {
+			ticks = opusFrameTicks
+		}
+		r.tsOffset = r.lastOutTS + ticks - p.Timestamp
 	}
 	p.SequenceNumber += r.seqOffset
 	p.Timestamp += r.tsOffset
@@ -88,7 +96,20 @@ type RelayStats struct {
 // Packets whose payload type is not srcOpusPT (RED, CN, DTMF) are dropped,
 // since only Opus is negotiated on the other leg.
 func Relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger) error {
-	var rw Rewriter
+	return relay(ctx, src, srcOpusPT, dst, stats, log, Rewriter{}, "audio")
+}
+
+// VideoFrameTicks is one frame at 30 fps on the 90 kHz video clock.
+const VideoFrameTicks = 3000
+
+// RelayVideo forwards video RTP of payload type srcPT (the negotiated codec;
+// retransmissions under their own payload type are dropped, the receiving
+// leg's NACK responder resends from its own buffer) from src to dst.
+func RelayVideo(ctx context.Context, src RTPReader, srcPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger) error {
+	return relay(ctx, src, srcPT, dst, stats, log, Rewriter{FrameTicks: VideoFrameTicks}, "video")
+}
+
+func relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw Rewriter, kind string) error {
 	loggedFirst := false
 	for {
 		if ctx.Err() != nil {
@@ -112,7 +133,7 @@ func Relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, s
 		stats.Forwarded.Add(1)
 		if !loggedFirst {
 			loggedFirst = true
-			log.Info().Msg("First audio packet relayed")
+			log.Info().Msg("First " + kind + " packet relayed")
 		}
 	}
 }

@@ -154,6 +154,9 @@ type JoinParams struct {
 	UsersToCall []string
 	// AudioTrackID is the msid track id of our audio track in the SDP.
 	AudioTrackID string
+	// VideoTrackID is the msid track id of our video track, for video calls
+	// (the server rings a video call when the caller's video is on).
+	VideoTrackID string
 	// E2eeState is our marshalled E2eeClientState (optional).
 	E2eeState []byte
 	// E2eeMandated is true for end-to-end encrypted threads.
@@ -197,9 +200,11 @@ func (c *CallContext) NewJoin(p *JoinParams) *Message {
 	if jr.UsersToCall == nil {
 		jr.UsersToCall = []string{}
 	}
-	if p.AudioTrackID != "" {
-		jr.MediaStatus[p.AudioTrackID] = true
-		jr.MediaStatusEx[p.AudioTrackID] = TrackInfo{Enabled: true}
+	for _, id := range []string{p.AudioTrackID, p.VideoTrackID} {
+		if id != "" {
+			jr.MediaStatus[id] = true
+			jr.MediaStatusEx[id] = TrackInfo{Enabled: true}
+		}
 	}
 	if p.Answer != "" {
 		jr.Answer = &SessionDescription{SDP: p.Answer}

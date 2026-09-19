@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/pion/webrtc/v4"
+
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 )
 
@@ -46,7 +48,7 @@ const webICEOptions = "a=ice-options:trickle fb-force-5245 renomination"
 // and fingerprint comparison is case-insensitive per RFC 8122), the web
 // client's ice-options, and an x-dtls-auth attribute signed with the
 // device's identity key.
-func PrepareMetaLocalSDP(sdp string, id *Identity) (string, error) {
+func PrepareMetaLocalSDP(sdp string, id *Identity, video bool) (string, error) {
 	sdp = fingerprintLineRe.ReplaceAllStringFunc(sdp, func(line string) string {
 		m := fingerprintLineRe.FindStringSubmatch(line)
 		return m[1] + strings.ToUpper(m[2]) + m[3]
@@ -61,7 +63,9 @@ func PrepareMetaLocalSDP(sdp string, id *Identity) (string, error) {
 		}
 		return line + webICEOptions + nl
 	})
-	sdp = noVideoSending(sdp)
+	if !video {
+		sdp = noVideoSending(sdp)
+	}
 	sdp = rtcsignal.StripDtlsAuth(sdp)
 	info, err := rtcsignal.SignDTLSAuth(id.Priv, id.Pub[:], id.UserID, id.DeviceID, sdp)
 	if err != nil {
@@ -118,4 +122,57 @@ func noVideoSending(sdp string) string {
 		}
 	}
 	return strings.Join(lines, "")
+}
+
+// PickVideoCodec chooses the video codec for bridging a call whose video is
+// described by sdp: VP8 when offered (every browser running Element has it),
+// else H264, else "" (no video). It only looks at the video m-section.
+func PickVideoCodec(sdp string) string {
+	codecs := videoRtpmap(sdp)
+	switch {
+	case codecs["VP8"]:
+		return webrtc.MimeTypeVP8
+	case codecs["H264"]:
+		return webrtc.MimeTypeH264
+	default:
+		return ""
+	}
+}
+
+// SendsVideo reports whether sdp has a video m-section that sends (sendrecv
+// or sendonly) and isn't disabled (port 0).
+func SendsVideo(sdp string) bool {
+	inVideo, sending := false, false
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "m="):
+			if inVideo && sending {
+				return true
+			}
+			inVideo = strings.HasPrefix(line, "m=video") && !strings.HasPrefix(line, "m=video 0 ")
+			sending = inVideo // sendrecv is the default direction
+		case inVideo && (line == "a=recvonly" || line == "a=inactive"):
+			sending = false
+		}
+	}
+	return inVideo && sending
+}
+
+func videoRtpmap(sdp string) map[string]bool {
+	out := map[string]bool{}
+	inVideo := false
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "m="):
+			inVideo = strings.HasPrefix(line, "m=video") && !strings.HasPrefix(line, "m=video 0 ")
+		case inVideo && strings.HasPrefix(line, "a=rtpmap:"):
+			fields := strings.Fields(line)
+			if len(fields) == 2 {
+				out[strings.ToUpper(strings.SplitN(fields[1], "/", 2)[0])] = true
+			}
+		}
+	}
+	return out
 }
