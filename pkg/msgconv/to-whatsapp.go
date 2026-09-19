@@ -25,6 +25,7 @@ import (
 	"image/draw"
 	"image/png"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -235,6 +236,24 @@ func reencodeNRGBA(ctx context.Context, data []byte) []byte {
 	return buf.Bytes()
 }
 
+// animatedStickerSize is the square box WhatsApp/Messenger stickers use.
+const animatedStickerSize = 512
+
+// maxAnimatedStickerSize is about what WhatsApp-family clients accept for an animated sticker.
+const maxAnimatedStickerSize = 500 * 1024
+
+// animatedWebPArgs turn a video or GIF into a looping, silent 512px animated WebP sticker.
+func animatedWebPArgs(fps, quality int) []string {
+	return []string{
+		"-vf", fmt.Sprintf("scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:512:-1:-1:color=0x00000000,fps=%d", fps),
+		"-c:v", "libwebp", "-lossless", "0", "-q:v", strconv.Itoa(quality), "-loop", "0", "-an", "-vsync", "0",
+	}
+}
+
+func isAnimatedStickerSource(mimeType string) bool {
+	return mimeType == "video/webm" || mimeType == "video/mp4" || mimeType == "image/gif"
+}
+
 func (mc *MessageConverter) reuploadMediaToWhatsApp(ctx context.Context, evt *event.Event, content *event.MessageEventContent) (*waMediaTransport.WAMediaTransport, string, error) {
 	mimeType := content.Info.MimeType
 	fileName := content.FileName
@@ -255,6 +274,20 @@ func (mc *MessageConverter) reuploadMediaToWhatsApp(ctx context.Context, evt *ev
 		}
 		mimeType = "audio/mp4"
 		fileName += ".m4a"
+	}
+	if content.MsgType == event.MessageType(event.EventSticker.Type) && isAnimatedStickerSource(mimeType) && ffmpeg.Supported() {
+		source := data
+		data, err = ffmpeg.ConvertBytes(ctx, source, ".webp", []string{}, animatedWebPArgs(24, 70), mimeType)
+		if err == nil && len(data) > maxAnimatedStickerSize {
+			// WhatsApp-family clients reject animated stickers over ~500 KB.
+			data, err = ffmpeg.ConvertBytes(ctx, source, ".webp", []string{}, animatedWebPArgs(15, 40), mimeType)
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("%w animated sticker to webp: %w", bridgev2.ErrMediaConvertFailed, err)
+		}
+		mimeType = "image/webp"
+		fileName = strings.TrimSuffix(fileName, filepath.Ext(fileName)) + ".webp"
+		content.Info.Width, content.Info.Height = animatedStickerSize, animatedStickerSize
 	}
 	if content.MsgType == event.MsgImage && mimeType == "image/png" {
 		cfg, err := png.DecodeConfig(bytes.NewReader(data))

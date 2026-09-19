@@ -140,6 +140,11 @@ var metaCaps = &event.RoomFeatures{
 			MimeTypes: map[string]event.CapabilitySupportLevel{
 				"image/png":  event.CapLevelFullySupported,
 				"image/webp": event.CapLevelFullySupported,
+				// Animated stickers from other networks (Telegram's video stickers, GIFs) are
+				// converted to animated WebP, the format Messenger's stickers use.
+				"video/webm": supportedIfFFmpeg(),
+				"video/mp4":  supportedIfFFmpeg(),
+				"image/gif":  supportedIfFFmpeg(),
 			},
 			Caption: event.CapLevelDropped,
 			MaxSize: MaxImageSize,
