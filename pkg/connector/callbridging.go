@@ -144,6 +144,9 @@ type callBridge struct {
 	sig *callsignal.Client
 	log zerolog.Logger
 
+	// preventSFURejected: the server refused a JOIN asking to stay peer-to-peer.
+	preventSFURejected atomic.Bool
+
 	lock   sync.Mutex
 	active *callSession
 	// bridged is when each portal last had a bridged call (set at start and
@@ -1165,6 +1168,30 @@ func (s *callSession) newMetaLeg() (*callbridge.Leg, error) {
 
 // join sends the JOIN and processes the response.
 func (s *callSession) join(cc *rtcsignal.CallContext, params *rtcsignal.JoinParams) error {
+	// Ask Messenger to keep the call peer-to-peer; its SFU needs SFrame, which the bridge doesn't do.
+	// If the server rejects that, join without it (and don't ask again).
+	if !s.cb.preventSFURejected.Load() {
+		p := *params
+		p.PreventSFU = true
+		err := s.joinOnce(cc, &p)
+		var rejected *joinRejectedError
+		if !errors.As(err, &rejected) {
+			return err
+		}
+		s.log.Warn().Int("status", rejected.status).Msg("Messenger rejected a JOIN asking to stay peer-to-peer, joining without")
+		s.cb.preventSFURejected.Store(true)
+	}
+	return s.joinOnce(cc, params)
+}
+
+// joinRejectedError is a JOIN the server answered with an error status.
+type joinRejectedError struct{ status int }
+
+func (e *joinRejectedError) Error() string {
+	return fmt.Sprintf("JOIN rejected with status %d", e.status)
+}
+
+func (s *callSession) joinOnce(cc *rtcsignal.CallContext, params *rtcsignal.JoinParams) error {
 	resp, err := s.cb.sig.RequestHook(s.ctx, cc.NewJoin(params), func(resp *rtcsignal.Message) {
 		if resp.Header.ResponseStatusCode != rtcsignal.StatusOK {
 			return
@@ -1181,6 +1208,9 @@ func (s *callSession) join(cc *rtcsignal.CallContext, params *rtcsignal.JoinPara
 		s.cc = cc
 		s.lock.Unlock()
 	})
+	if err != nil && resp != nil && resp.Header.ResponseStatusCode != rtcsignal.StatusOK {
+		return &joinRejectedError{status: int(resp.Header.ResponseStatusCode)}
+	}
 	if err != nil {
 		return fmt.Errorf("JOIN failed: %w", err)
 	}

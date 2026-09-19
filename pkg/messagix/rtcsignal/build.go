@@ -161,6 +161,9 @@ type JoinParams struct {
 	E2eeState []byte
 	// E2eeMandated is true for end-to-end encrypted threads.
 	E2eeMandated bool
+	// PreventSFU asks the server to keep the call peer-to-peer (E2eeEnforcement.preventSFUMode) rather
+	// than moving it to its SFU, which needs SFrame frame encryption the bridge doesn't do.
+	PreventSFU bool
 }
 
 // coplayInitialState is the web client's initial "coplay" state (an empty
@@ -220,9 +223,9 @@ func (c *CallContext) NewJoin(p *JoinParams) *Message {
 	}
 	jr.SyncPayload = &SyncPayload{StateStore: store}
 	if p.E2eeMandated {
-		jr.E2eeEnforcement = &E2eeEnforcement{Mode: E2eeMandated}
+		jr.E2eeEnforcement = &E2eeEnforcement{Mode: E2eeMandated, PreventSFUMode: p.PreventSFU}
 	} else {
-		jr.E2eeEnforcement = &E2eeEnforcement{Mode: E2eeNotMandated}
+		jr.E2eeEnforcement = &E2eeEnforcement{Mode: E2eeNotMandated, PreventSFUMode: p.PreventSFU}
 	}
 	return c.Request(TypeJoin, Body{JoinRequest: jr})
 }

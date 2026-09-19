@@ -260,3 +260,25 @@ func TestJoinLabelsVideoTrack(t *testing.T) {
 		t.Fatalf("media status: %+v", ex)
 	}
 }
+
+// TestJoinPreventsSFU: a JOIN asking to stay peer-to-peer carries e2eeEnforcement.preventSFUMode.
+func TestJoinPreventsSFU(t *testing.T) {
+	ring := fakeRing()
+	cc := NewCallContext(fakeCallee, ring.Header.ConferenceName, ring.Header.ServerInfoData)
+	for _, prevent := range []bool{true, false} {
+		enc, err := EncodePayload(cc.NewJoin(&JoinParams{
+			Answer: "v=0\r\n", PeerID: fakeCaller, AudioTrackID: fakeTrackID, E2eeMandated: true, PreventSFU: prevent,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		back, err := DecodePayload(enc, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := back.Body.JoinRequest.E2eeEnforcement
+		if e == nil || e.Mode != E2eeMandated || e.PreventSFUMode != prevent {
+			t.Errorf("preventSFUMode %v: got %+v", prevent, e)
+		}
+	}
+}
