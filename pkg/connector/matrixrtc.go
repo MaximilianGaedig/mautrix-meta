@@ -602,8 +602,20 @@ func (cb *callBridge) startOutgoingRTC(ctx context.Context, portal *bridgev2.Por
 func (cb *callBridge) handleRTCMembership(ctx context.Context, portal *bridgev2.Portal, evt *event.Event) {
 	mem := parseRTCMembership(evt)
 	cb.lock.Lock()
-	s := cb.active
+	s, g := cb.active, cb.group
 	cb.lock.Unlock()
+	if isGroupPortal(portal) {
+		switch {
+		case g != nil && g.portal.MXID == portal.MXID && mem.joined:
+			g.userJoined()
+		case g != nil && g.portal.MXID == portal.MXID:
+			g.log.Info().Msg("The Matrix user left the group call")
+			go g.end("")
+		case g == nil && s == nil && mem.joined:
+			cb.startOutgoingGroup(ctx, portal)
+		}
+		return
+	}
 	if s != nil && s.portal.MXID != portal.MXID {
 		s = nil
 	}

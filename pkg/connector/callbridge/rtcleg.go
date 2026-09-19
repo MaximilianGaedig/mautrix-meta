@@ -38,6 +38,10 @@ type RTCLegConfig struct {
 	URL   string
 	Token string
 	Log   zerolog.Logger
+	// Accept, when set, picks whose tracks this leg takes (by LiveKit identity); others are
+	// unsubscribed. In a group call only one leg feeds the Matrix user's media to Messenger, and the
+	// other participants' legs take nothing.
+	Accept func(identity string) bool
 }
 
 // RTCLeg is the bridge's side of a MatrixRTC (Element Call / Element X) call: a LiveKit participant,
@@ -45,8 +49,9 @@ type RTCLegConfig struct {
 // the media the Matrix participants publish. Unlike Leg there is no SDP to shuttle: LiveKit's
 // signalling happens inside the SDK.
 type RTCLeg struct {
-	log  zerolog.Logger
-	room *lksdk.Room
+	log    zerolog.Logger
+	accept func(identity string) bool
+	room   *lksdk.Room
 
 	audio *webrtc.TrackLocalStaticRTP
 
@@ -69,6 +74,7 @@ func JoinRTC(ctx context.Context, cfg RTCLegConfig) (*RTCLeg, error) {
 	quietSDK.Do(func() { lksdk.SetLogger(protoLogger.LogRLogger(logr.Discard())) })
 	l := &RTCLeg{
 		log:         cfg.Log,
+		accept:      cfg.Accept,
 		remoteAudio: make(chan *webrtc.TrackRemote, 1),
 		remoteVideo: make(chan *webrtc.TrackRemote, 1),
 		owners:      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant{},
@@ -232,7 +238,11 @@ func (l *RTCLeg) requestKeyframe() {
 	}
 }
 
-func (l *RTCLeg) onTrackSubscribed(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+func (l *RTCLeg) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+	if l.accept != nil && !l.accept(rp.Identity()) {
+		_ = pub.SetSubscribed(false)
+		return
+	}
 	l.log.Debug().Str("participant", rp.Identity()).Str("kind", track.Kind().String()).
 		Str("codec", track.Codec().MimeType).Msg("Subscribed to MatrixRTC track")
 	ch := l.remoteAudio

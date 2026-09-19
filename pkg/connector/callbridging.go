@@ -149,6 +149,8 @@ type callBridge struct {
 
 	lock   sync.Mutex
 	active *callSession
+	// group is the bridged group (SFU) call, if any; see groupcall.go. One call at a time.
+	group *groupCall
 	// bridged is when each portal last had a bridged call (set at start and
 	// end), so Messenger's call notifications for it don't also become
 	// "answer on Messenger" / "missed call" text notices.
@@ -358,10 +360,23 @@ func (s *callSession) matches(msg *rtcsignal.Message) bool {
 // it only picks the response and hands the work to goroutines.
 func (cb *callBridge) handleSignal(ctx context.Context, msg *rtcsignal.Message, via callsignal.Transport) *rtcsignal.Message {
 	cb.lock.Lock()
-	s := cb.active
+	s, g := cb.active, cb.group
 	cb.lock.Unlock()
+	if g != nil && g.matches(msg) {
+		if msg.Body.RingRequest != nil {
+			return nil // the server retries RING until answered
+		}
+		return g.handleSignal(msg)
+	}
 	if ring := msg.Body.RingRequest; ring != nil {
 		switch {
+		case s == nil && g == nil && isGroupRing(ring):
+			callsignal.LogMessage(cb.log.Info(), msg).Str("via", string(via)).Msg("Incoming Messenger group call")
+			go cb.startIncomingGroup(context.WithoutCancel(ctx), msg)
+			return nil
+		case g != nil:
+			callsignal.LogMessage(cb.log.Info(), msg).Msg("In a group call, answering ring as busy")
+			return rtcsignal.NewRingResponse(msg, rtcsignal.NewClientSessionID(), rtcsignal.DeviceStatusInAnotherCall)
 		case s != nil && s.matches(msg):
 			// The server retries RING (every ~10 s) until answered.
 			return nil
