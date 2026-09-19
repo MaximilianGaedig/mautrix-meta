@@ -30,7 +30,9 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
+
 	"github.com/rs/zerolog"
+	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 )
 
 // OpusPT is the Opus payload type both Chrome and Element use.
@@ -98,6 +100,9 @@ type Leg struct {
 	onCandidate func(*webrtc.ICECandidateInit)
 	onState     func(webrtc.PeerConnectionState)
 	gathered    chan struct{}
+	// onRemoteTrack, when set, gets every remote track (SFU calls carry one
+	// per participant) instead of RemoteTrack/RemoteVideoTrack.
+	onRemoteTrack func(*webrtc.TrackRemote)
 	// unappliedOffer is a mid-call offer sent but not yet answered. It is
 	// applied (SetLocalDescription) only together with its answer: Pion
 	// has no rollback, so an offer the peer rejects or talks over would
@@ -228,6 +233,14 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 			Str("codec", tr.Codec().MimeType).
 			Uint8("pt", uint8(tr.PayloadType())).
 			Msg("Remote track started")
+		l.lock.Lock()
+		each := l.onRemoteTrack
+		l.lock.Unlock()
+		if each != nil {
+			// SFU: every participant's track, not just the first audio/video one.
+			go each(tr)
+			return
+		}
 		ch := l.remote
 		if tr.Kind() == webrtc.RTPCodecTypeVideo {
 			ch = l.remoteV
@@ -238,6 +251,31 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 		}
 	})
 	return l, nil
+}
+
+// OnRemoteTrack makes every remote track go to fn instead of RemoteTrack /
+// RemoteVideoTrack, for SFU calls where each participant brings its own.
+func (l *Leg) OnRemoteTrack(fn func(*webrtc.TrackRemote)) {
+	l.lock.Lock()
+	l.onRemoteTrack = fn
+	l.lock.Unlock()
+}
+
+// AnswerDelta applies an SFU's delta media update (participants' m-sections
+// added or changed, see ApplySDPDelta) to the current remote description and
+// answers the resulting offer, like the web client's
+// applyRemoteOfferAndSetLocalAnswer. The answer goes back in the
+// SERVER_MEDIA_UPDATE response.
+func (l *Leg) AnswerDelta(update *rtcsignal.SessionDescriptionUpdate) (string, error) {
+	remote := l.PC.RemoteDescription()
+	if remote == nil {
+		return "", errors.New("delta update before the first remote description")
+	}
+	offer, err := ApplySDPDelta(remote.SDP, update)
+	if err != nil {
+		return "", err
+	}
+	return l.AnswerRenegotiation(PrepareMetaRemoteSDP(offer))
 }
 
 // OnCandidate sets the callback for local ICE candidates (trickle).
