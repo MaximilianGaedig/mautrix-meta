@@ -25,6 +25,7 @@ require (
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/refraction-networking/utls v1.8.2
 	github.com/rs/zerolog v1.35.1
+	github.com/tetratelabs/wazero v1.12.0
 	github.com/tidwall/gjson v1.19.0
 	github.com/zyedidia/clipboard v1.0.4
 	go.mau.fi/libsignal v0.2.2
