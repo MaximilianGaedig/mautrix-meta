@@ -403,6 +403,30 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		return s.respond(msg, rtcsignal.Body{ServerMediaUpdateResponse: resp})
 	}
 	sdpType, sd := smu.RemoteSDP()
+	tracks := zerolog.Dict()
+	for id, ti := range smu.MediaStatus {
+		tracks.Dict(id, zerolog.Dict().
+			Bool("enabled", ti.Enabled).
+			Int32("paused_up", ti.PausedUplink).
+			Int32("paused_down", ti.PausedDownlink).
+			Str("owner", ti.Owner).
+			Int32("label", ti.Label))
+	}
+	s.lock.Lock()
+	ours := []string{}
+	if s.metaLeg != nil {
+		ours = append(ours, s.metaLeg.TrackID, s.metaLeg.VideoTrackID)
+	}
+	s.lock.Unlock()
+	s.log.Info().
+		Int64("from_version", smu.FromVersion).
+		Int64("to_version", smu.ToVersion).
+		Str("sdp_type", sdpType).
+		Bool("renegotiation_requested", smu.RenegotiationRequested).
+		Bool("has_renegotiation_offer", smu.RenegotiationOffer != nil && smu.RenegotiationOffer.SDP != "").
+		Strs("our_tracks", ours).
+		Dict("media_status", tracks).
+		Msg("Messenger media update")
 	s.lock.Lock()
 	leg := s.metaLeg
 	s.lock.Unlock()
