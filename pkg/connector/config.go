@@ -34,6 +34,7 @@ type Config struct {
 	PresenceBridging          bool `yaml:"presence_bridging"`
 	CallNotices               bool `yaml:"call_notices"`
 	CallBridging              bool `yaml:"call_bridging"`
+	CallBridgingMatrixRTC     bool `yaml:"call_bridging_matrixrtc"`
 	DisableViewOnce           bool `yaml:"disable_view_once"`
 	MarketplaceSpace          bool `yaml:"marketplace_space"`
 	LogRedactedLoginResponses bool `yaml:"log_redacted_login_responses"`
@@ -81,6 +82,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "presence_bridging")
 	helper.Copy(up.Bool, "call_notices")
 	helper.Copy(up.Bool, "call_bridging")
+	helper.Copy(up.Bool, "call_bridging_matrixrtc")
 	helper.Copy(up.Bool, "disable_view_once")
 	helper.Copy(up.Bool, "marketplace_space")
 	helper.Copy(up.Bool, "log_redacted_login_responses")

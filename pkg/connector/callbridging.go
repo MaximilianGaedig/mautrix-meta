@@ -52,6 +52,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-meta/pkg/connector/callbridge"
 	"go.mau.fi/mautrix-meta/pkg/messagix"
@@ -91,6 +92,10 @@ func (m *MetaConnector) registerCallEventHandlers() {
 	}
 	for _, t := range matrixCallEventTypes {
 		mx.EventProcessor.On(t, m.handleMatrixCallEvent)
+	}
+	if m.Config.CallBridgingMatrixRTC {
+		mx.EventProcessor.On(evtCallMember, m.handleMatrixCallEvent)
+		mx.EventProcessor.On(evtRTCDecline, m.handleMatrixCallEvent)
 	}
 }
 
@@ -207,6 +212,9 @@ func (m *MetaClient) startCallBridging(ctx context.Context) {
 	}
 	sig.Start(ctx)
 	log.Info().Msg("Call bridging started")
+	if m.matrixRTCEnabled() {
+		go m.ensureDMCallPowerLevels(context.WithoutCancel(ctx))
+	}
 }
 
 // stopCallBridging ends any active call and closes the channels.
@@ -300,6 +308,16 @@ type callSession struct {
 	mxCandBuf     []event.CallCandidate
 	mxCandTimer   *time.Timer
 	mxLocalSDP    string // outgoing: our answer, sent once Messenger answers
+
+	// MatrixRTC side (instead of the legacy m.call.* leg; see matrixrtc.go)
+	rtcMode        bool
+	rtc            *callbridge.RTCLeg
+	rtcFocus       *rtcTransport
+	rtcCreatedTS   int64
+	rtcMemberEvent id.EventID
+	rtcJoined      bool
+	rtcRing        id.EventID
+	rtcUserPresent bool
 
 	endOnce sync.Once
 }
@@ -829,10 +847,25 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 		s.end(endFailed, "")
 		return
 	}
-	if err = s.ringMatrix(); err != nil {
-		s.log.Err(err).Msg("Failed to ring Matrix")
-		s.end(endFailed, "")
-		return
+	if s.m.matrixRTCEnabled() {
+		s.lock.Lock()
+		s.rtcMode = true
+		s.lock.Unlock()
+		if err = s.ringRTC(); err != nil {
+			// Fall back to a legacy call, which Element Web still answers.
+			s.log.Warn().Err(err).Msg("Failed to ring through MatrixRTC, ringing with a legacy call")
+			s.leaveRTC(s.ctx)
+			s.lock.Lock()
+			s.rtcMode = false
+			s.lock.Unlock()
+		}
+	}
+	if !s.rtcMode {
+		if err = s.ringMatrix(); err != nil {
+			s.log.Err(err).Msg("Failed to ring Matrix")
+			s.end(endFailed, "")
+			return
+		}
 	}
 	// Only the TURN lookup happens while ringing. Creating the leg early let
 	// Pion start connectivity checks towards a caller that didn't know our
@@ -1005,6 +1038,10 @@ func (s *callSession) onMetaState(state webrtc.PeerConnectionState) {
 // startRelay forwards audio in both directions once both remote tracks
 // exist.
 func (s *callSession) startRelay() {
+	if s.rtcMode {
+		s.startRTCRelay()
+		return
+	}
 	s.lock.Lock()
 	metaLeg, mxLeg := s.metaLeg, s.mxLeg
 	s.lock.Unlock()
@@ -1240,6 +1277,10 @@ func (s *callSession) answerMessenger() {
 // answerMatrixOutgoing sends m.call.answer once the Messenger peer answered
 // an outgoing call.
 func (s *callSession) answerMatrixOutgoing() {
+	if s.rtcMode {
+		s.connectRTCOutgoing()
+		return
+	}
 	s.lock.Lock()
 	sdp := s.mxLocalSDP
 	s.mxAnswered = true
@@ -1420,6 +1461,16 @@ func parseCallContent[T any](evt *event.Event) (*T, bool) {
 
 func (cb *callBridge) handleMatrixEvent(ctx context.Context, portal *bridgev2.Portal, evt *event.Event) {
 	log := zerolog.Ctx(ctx)
+	switch evt.Type {
+	case evtCallMember:
+		if cb.m.matrixRTCEnabled() {
+			go cb.handleRTCMembership(context.WithoutCancel(ctx), portal, evt)
+		}
+		return
+	case evtRTCDecline:
+		cb.handleRTCDecline(evt)
+		return
+	}
 	if evt.Type == event.CallInvite {
 		inv, ok := parseCallContent[event.CallInviteEventContent](evt)
 		if !ok {
@@ -1652,7 +1703,9 @@ func (s *callSession) end(reason endReason, detail string) {
 		}
 
 		// Matrix side.
-		if mxStarted && reason != endLocalHangup && reason != endLocalDecline {
+		if s.rtcMode {
+			s.leaveRTC(sendCtx)
+		} else if mxStarted && reason != endLocalHangup && reason != endLocalDecline {
 			mxReason := event.CallHangupUserHangup
 			switch reason {
 			case endTimeout:

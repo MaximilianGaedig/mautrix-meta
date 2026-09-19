@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/go-logr/logr"
 	"github.com/livekit/protocol/livekit"
+	protoLogger "github.com/livekit/protocol/logger"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
@@ -50,17 +52,24 @@ type RTCLeg struct {
 	video       *webrtc.TrackLocalStaticRTP
 	remoteAudio chan *webrtc.TrackRemote
 	remoteVideo chan *webrtc.TrackRemote
+	owners      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant
 	onPeers     func(identities []string)
 	onKeyframe  func()
 	closed      bool
 }
 
+// quietSDK stops the LiveKit SDK logging every connection-state change to stderr (its default); its
+// failures reach us as errors.
+var quietSDK sync.Once
+
 // JoinRTC connects to the LiveKit room and publishes an Opus audio track.
 func JoinRTC(ctx context.Context, cfg RTCLegConfig) (*RTCLeg, error) {
+	quietSDK.Do(func() { lksdk.SetLogger(protoLogger.LogRLogger(logr.Discard())) })
 	l := &RTCLeg{
 		log:         cfg.Log,
 		remoteAudio: make(chan *webrtc.TrackRemote, 1),
 		remoteVideo: make(chan *webrtc.TrackRemote, 1),
+		owners:      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant{},
 	}
 	cb := lksdk.NewRoomCallback()
 	cb.OnTrackSubscribed = l.onTrackSubscribed
@@ -221,12 +230,23 @@ func (l *RTCLeg) onTrackSubscribed(track *webrtc.TrackRemote, _ *lksdk.RemoteTra
 	if l.closed {
 		return
 	}
+	l.owners[track] = rp
 	// Keep the newest: a participant who rejoins replaces their old track.
 	select {
 	case <-ch:
 	default:
 	}
 	ch <- track
+}
+
+// RequestKeyframe asks the publisher of a subscribed video track for a keyframe (through the SFU).
+func (l *RTCLeg) RequestKeyframe(track *webrtc.TrackRemote) {
+	l.mu.Lock()
+	rp := l.owners[track]
+	l.mu.Unlock()
+	if rp != nil {
+		rp.WritePLI(track.SSRC())
+	}
 }
 
 // Close leaves the room.

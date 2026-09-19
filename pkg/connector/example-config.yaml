@@ -48,6 +48,11 @@ call_notices: true
 # Messenger E2EE device and network access to Meta's TURN servers.
 # Calling is abuse-monitored by Meta, so this is off by default.
 call_bridging: false
+# With call_bridging: bridge calls through MatrixRTC (Element Call, the only kind Element X makes and
+# rings for) instead of legacy m.call.* events. The Messenger user's ghost joins the room's call on the
+# homeserver's LiveKit (its well-known org.matrix.msc4143.rtc_foci / rtc/transports), and the bridge
+# lets DM portal members send org.matrix.msc3401.call.member.
+call_bridging_matrixrtc: true
 # Should view-once messages be disabled entirely?
 disable_view_once: false
 # Should FB marketplace chats have a separate space inside the main Facebook space?

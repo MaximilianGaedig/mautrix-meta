@@ -22,6 +22,7 @@ type MetaConnector struct {
 	DB          *metadb.MetaDB
 
 	presence *presence.Manager
+	rtcFocus rtcFocus
 }
 
 var (

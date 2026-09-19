@@ -11,6 +11,7 @@ require (
 	github.com/beeper/poly1305 v0.0.0-20250815183548-d4eede7bbf3c
 	github.com/coder/websocket v1.8.15
 	github.com/gabriel-vasile/mimetype v1.4.15
+	github.com/go-logr/logr v1.4.3
 	github.com/google/go-querystring v1.2.0
 	github.com/google/uuid v1.6.0
 	github.com/imroc/req/v3 v3.56.0
@@ -57,7 +58,6 @@ require (
 	github.com/frostbyte73/core v0.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/gammazero/deque v1.2.1 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/cel-go v0.28.1 // indirect
