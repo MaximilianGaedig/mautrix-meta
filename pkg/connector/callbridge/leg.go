@@ -53,6 +53,9 @@ type LegConfig struct {
 	// video transceiver and a data channel to offers, so an offer has the
 	// same m-lines (audio, video, application) as facebook.com's.
 	WebShape bool
+	// SFU declares the web client's RTP header extensions (MID among them), which Messenger's SFU
+	// routes participants' streams by.
+	SFU bool
 	// PlanB creates the PeerConnection with Plan B semantics, for answering a
 	// Plan B offer (Messenger's mobile apps); see IsPlanB. Everything else is
 	// Unified Plan. Pion's "Unified Plan with fallback" is not used: it guesses
@@ -136,6 +139,15 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 				continue
 			}
 			if err := me.RegisterCodec(c, webrtc.RTPCodecTypeVideo); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if cfg.SFU {
+		// The web client's SFU offer declares these; the SFU routes each participant's stream by
+		// its MID extension, and without it Pion can't tell streams it has no a=ssrc for apart.
+		for _, ext := range webHeaderExtensions {
+			if err := me.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: ext.uri}, ext.kind); err != nil {
 				return nil, err
 			}
 		}
@@ -455,6 +467,20 @@ func videoCapability(mime string) webrtc.RTPCodecCapability {
 		c.SDPFmtpLine = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
 	}
 	return c
+}
+
+// webHeaderExtensions are the RTP header extensions of the web client's SFU offer that Pion supports.
+var webHeaderExtensions = []struct {
+	uri  string
+	kind webrtc.RTPCodecType
+}{
+	{"urn:ietf:params:rtp-hdrext:ssrc-audio-level", webrtc.RTPCodecTypeAudio},
+	{"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time", webrtc.RTPCodecTypeAudio},
+	{"urn:ietf:params:rtp-hdrext:sdes:mid", webrtc.RTPCodecTypeAudio},
+	{"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time", webrtc.RTPCodecTypeVideo},
+	{"urn:ietf:params:rtp-hdrext:sdes:mid", webrtc.RTPCodecTypeVideo},
+	{"urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id", webrtc.RTPCodecTypeVideo},
+	{"urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id", webrtc.RTPCodecTypeVideo},
 }
 
 // CreateOffer makes and applies a local offer: audio sendrecv, plus for

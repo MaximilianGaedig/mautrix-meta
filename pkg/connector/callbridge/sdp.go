@@ -109,6 +109,17 @@ func AudioTrackID(sdp string) string {
 	return ""
 }
 
+// RedactSDP drops an SDP's ICE password and x-dtls-auth, for logging.
+func RedactSDP(sdp string) string {
+	var out []string
+	for _, line := range strings.Split(strings.ReplaceAll(sdp, "\r\n", "\n"), "\n") {
+		if !strings.HasPrefix(line, "a=ice-pwd:") && !strings.HasPrefix(line, "a=x-dtls-auth:") {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 // SSRCCname returns the cname of the SDP's first a=ssrc line. A client's cname names it in
 // end-to-end encrypted group calls: its E2EE id is "<userId>:<cname>".
 func SSRCCname(sdp string) string {

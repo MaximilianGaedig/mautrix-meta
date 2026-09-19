@@ -104,6 +104,9 @@ func TestWebShapedSDP(t *testing.T) {
 	if got := mLines(webOffer); fmt.Sprint(got) != "[audio sendrecv video recvonly application]" {
 		t.Fatalf("offer m-lines: %v", got)
 	}
+	if strings.Contains(webOffer, "ssrc-audio-level") {
+		t.Error("a 1:1 leg's offer declares the SFU header extensions")
+	}
 
 	meta := newTestLeg(t, "meta", OpusPT, true)
 	answer, err := meta.AnswerOffer(PrepareMetaRemoteSDP(webOffer))
@@ -853,5 +856,24 @@ func TestSSRCCname(t *testing.T) {
 		if got := E2eeIDOfStream(stream); got != want {
 			t.Errorf("E2eeIDOfStream(%q) = %q, want %q", stream, got, want)
 		}
+	}
+}
+
+// TestSFUOfferExtensions: an SFU leg's offer declares the MID extension in both media sections, which
+// the SFU routes streams by.
+func TestSFUOfferExtensions(t *testing.T) {
+	l, err := NewLeg(LegConfig{Name: "sfu", WebShape: true, SFU: true, AllowVideo: true, Settings: loopbackSettings(), Log: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Close)
+	offer, err := l.CreateOffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pion offers MID for video on its own, but not for audio.
+	audio, _, _ := strings.Cut(offer, "m=video")
+	if !strings.Contains(audio, "urn:ietf:params:rtp-hdrext:sdes:mid") {
+		t.Error("the audio section doesn't declare the MID extension")
 	}
 }

@@ -24,6 +24,7 @@ import (
 
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
+	"github.com/rs/zerolog"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 )
@@ -78,7 +79,11 @@ func TestApplySDPDelta(t *testing.T) {
 func TestSFUDeltaLoopback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	bridge := newTestLeg(t, "bridge", 111, true)
+	bridge, err := NewLeg(LegConfig{Name: "bridge", OpusPT: 111, WebShape: true, SFU: true, Settings: loopbackSettings(), Log: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(bridge.Close)
 	tracks := make(chan *webrtc.TrackRemote, 4)
 	bridge.OnRemoteTrack(func(tr *webrtc.TrackRemote) { tracks <- tr })
 

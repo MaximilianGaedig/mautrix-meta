@@ -81,7 +81,8 @@ type groupParticipant struct {
 	userID string
 	ghost  bridgev2.MatrixAPI
 	rtc    *callbridge.RTCLeg
-	joined bool // call.member sent
+	joined bool       // call.member sent
+	member id.EventID // the call.member event (ring notifications reference it)
 	video  callbridge.RTPWriter
 	tracks map[string]bool // Messenger track ids being relayed
 }
@@ -383,12 +384,14 @@ func (g *groupCall) joinRTC(p *groupParticipant) error {
 		leg.OnPeers(g.onRTCPeers)
 		go g.relayUserAudio(leg)
 	}
-	if _, err = cli.SendStateEvent(g.ctx, g.portal.MXID, evtCallMember, rtcStateKey(cli.UserID, rtcDeviceID),
-		rtcMemberContent(focus, g.portal.MXID, rtcDeviceID, string(cli.UserID), false, created)); err != nil {
+	resp, err := cli.SendStateEvent(g.ctx, g.portal.MXID, evtCallMember, rtcStateKey(cli.UserID, rtcDeviceID),
+		rtcMemberContent(focus, g.portal.MXID, rtcDeviceID, string(cli.UserID), false, created))
+	if err != nil {
 		return fmt.Errorf("send call membership: %w", err)
 	}
 	g.lock.Lock()
 	p.joined = true
+	p.member = resp.EventID
 	g.lock.Unlock()
 	return nil
 }
@@ -426,9 +429,14 @@ func (g *groupCall) ringMatrix(caller string) error {
 	if err = g.joinRTC(p); err != nil {
 		return fmt.Errorf("join MatrixRTC call: %w", err)
 	}
+	g.lock.Lock()
+	member := p.member
+	g.lock.Unlock()
+	// Element X only rings for a notification that references the ringing member's call.member.
 	resp, err := p.ghost.SendMessage(g.ctx, g.portal.MXID, evtRTCNotification, &event.Content{Raw: map[string]any{
 		"notification_type": "ring",
 		"m.mentions":        map[string]any{"user_ids": []id.UserID{g.m.UserLogin.UserMXID}},
+		"m.relates_to":      map[string]any{"rel_type": "m.reference", "event_id": member},
 		"sender_ts":         time.Now().UnixMilli(),
 		"lifetime":          rtcRingLifetime.Milliseconds(),
 		"m.call.intent":     "audio",
@@ -439,6 +447,7 @@ func (g *groupCall) ringMatrix(caller string) error {
 	g.lock.Lock()
 	g.ring = resp.EventID
 	g.lock.Unlock()
+	g.log.Info().Stringer("ring_event", resp.EventID).Stringer("member_event", member).Msg("Rang Matrix for the group call")
 	return nil
 }
 
@@ -518,7 +527,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 		return
 	}
 	leg, err := callbridge.NewLeg(callbridge.LegConfig{
-		Name: "messenger-sfu", WebShape: true, AllowVideo: true, Log: g.log,
+		Name: "messenger-sfu", WebShape: true, SFU: true, AllowVideo: true, Log: g.log,
 	})
 	if err != nil {
 		g.log.Err(err).Msg("Failed to create the Messenger SFU connection")
@@ -601,6 +610,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 	g.log.Info().Int32("media_path", int32(jr.MediaPath)).Int64("sctp_node", jr.SelfSCTPNodeID).
 		Int("groups_of_users", len(jr.GroupsOfUsers)).Msg("Joined Messenger group call")
 	callbridge.LogSDPShape(g.log.Info(), jr.Answer.SDP).Msg("SFU answer")
+	g.log.Debug().Str("offer", callbridge.RedactSDP(offer)).Str("answer", callbridge.RedactSDP(jr.Answer.SDP)).Msg("SFU JOIN SDPs")
 	if err = leg.SetAnswer(callbridge.PrepareMetaRemoteSDP(jr.Answer.SDP)); err != nil {
 		g.log.Err(err).Msg("Failed to apply the SFU's answer")
 		g.end("")
@@ -730,6 +740,20 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 	case smu.Answer != nil:
 		err = leg.SetRenegotiationAnswer(callbridge.PrepareMetaRemoteSDP(smu.Answer.SDP))
 	}
+	if g.log.GetLevel() <= zerolog.DebugLevel {
+		ev := g.log.Debug().Bool("offer", smu.Offer != nil).Bool("renegotiation_offer", smu.RenegotiationOffer != nil).
+			Bool("answer", smu.Answer != nil).Bool("renegotiation_requested", smu.RenegotiationRequested)
+		if smu.Update != nil {
+			for _, idx := range smu.Update.Indexes() {
+				m := smu.Update.Media[idx]
+				ev = ev.Str("delta_"+strconv.Itoa(int(idx)), "mid="+m.MID+" msid="+m.MSID+"\n"+callbridge.RedactSDP(m.Body))
+			}
+		}
+		for trackID, ti := range smu.MediaStatus {
+			ev = ev.Str("track_"+trackID, fmt.Sprintf("owner=%s label=%d enabled=%v", ti.Owner, ti.Label, ti.Enabled))
+		}
+		ev.Msg("Group call media update contents")
+	}
 	g.log.Info().Int64("from_version", smu.FromVersion).Int64("to_version", smu.ToVersion).
 		Ints32("tags", msg.Header.MessageTags).Bool("delta", smu.Update != nil).Int("owners", len(smu.MediaStatus)).
 		AnErr("err", err).Msg("Group call media update")
@@ -808,9 +832,11 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 	if owner == "" {
 		owner, _, _ = strings.Cut(tr.StreamID(), ":")
 	}
-	log := g.log.With().Str("owner", owner).Stringer("kind", tr.Kind()).Logger()
+	log := g.log.With().Str("owner", owner).Stringer("kind", tr.Kind()).Str("track", tr.ID()).Uint32("ssrc", uint32(tr.SSRC())).Logger()
+	log.Info().Str("stream", tr.StreamID()).Msg("Group call track")
 	if owner == "" || owner == strconv.FormatInt(g.m.selfFBID(), 10) {
-		log.Debug().Str("track", tr.ID()).Msg("Ignoring a group call track without another owner")
+		log.Info().Str("track", tr.ID()).Str("stream", tr.StreamID()).Str("rid", tr.RID()).Uint32("ssrc", uint32(tr.SSRC())).
+			Uint8("pt", uint8(tr.PayloadType())).Msg("Ignoring a group call track without another owner")
 		return
 	}
 	p, err := g.participant(owner)
@@ -844,11 +870,47 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 			p.video = w
 			g.lock.Unlock()
 		}
+		g.forwardKeyframes(rtc, tr)
 		err = callbridge.RelayVideo(g.ctx, tr, uint8(tr.PayloadType()), w, &stats, log)
 	} else {
 		err = callbridge.Relay(g.ctx, tr, uint8(tr.PayloadType()), rtc.AudioWriter(), &stats, log)
 	}
 	log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Participant relay stopped")
+}
+
+// forwardKeyframes asks Messenger for keyframes of a participant's video: a few right away (nobody
+// in the Matrix call can show anything before one) and whenever the participant's LiveKit leg is
+// asked for one, at most every 500 ms.
+func (g *groupCall) forwardKeyframes(rtc *callbridge.RTCLeg, tr *webrtc.TrackRemote) {
+	g.lock.Lock()
+	leg := g.leg
+	g.lock.Unlock()
+	if leg == nil {
+		return
+	}
+	ssrc := tr.SSRC()
+	var mu sync.Mutex
+	var last time.Time
+	rtc.OnKeyframeRequest(func() {
+		mu.Lock()
+		if time.Since(last) < 500*time.Millisecond {
+			mu.Unlock()
+			return
+		}
+		last = time.Now()
+		mu.Unlock()
+		leg.RequestKeyframe(ssrc)
+	})
+	go func() {
+		for _, d := range []time.Duration{0, 300 * time.Millisecond, 700 * time.Millisecond, time.Second} {
+			select {
+			case <-g.ctx.Done():
+				return
+			case <-time.After(d):
+			}
+			leg.RequestKeyframe(ssrc)
+		}
+	}()
 }
 
 // relayDecrypted relays an encrypted call's track: every frame is decrypted with the sender's key
@@ -888,6 +950,7 @@ func (g *groupCall) relayDecrypted(crypt *groupE2ee, p *groupParticipant, rtc *c
 				leg.RequestKeyframe(tr.SSRC())
 			}
 		}
+		g.forwardKeyframes(rtc, tr)
 		err = callbridge.RelayVideoTransformed(g.ctx, tr, uint8(tr.PayloadType()), tr.Codec().MimeType, w, xf, onLoss, &stats, log)
 	} else {
 		err = callbridge.RelayAudioTransformed(g.ctx, tr, uint8(tr.PayloadType()), rtc.AudioWriter(), xf, &stats, log)
