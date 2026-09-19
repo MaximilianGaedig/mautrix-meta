@@ -140,6 +140,10 @@ type groupE2ee struct {
 }
 
 type groupE2eeConfig struct {
+	// Mandated is set for calls in end-to-end encrypted chats: media is dropped rather than sent
+	// in the clear if encryption is negotiated off. Other calls encrypt whenever Messenger
+	// negotiates encryption on (as the web client does) and pass media through otherwise.
+	Mandated bool
 	SelfID   string
 	Identity *callbridge.Identity
 	// LocalCname is the cname of our SDP; our E2EE id is "<SelfID>:<LocalCname>".
@@ -186,7 +190,7 @@ func newGroupE2ee(ctx context.Context, rt *framecrypt.Runtime, cfg groupE2eeConf
 	pub := append([]byte{ecc.DjbType}, cfg.Identity.Pub[:]...)
 	priv := append([]byte(nil), cfg.Identity.Priv[:]...)
 	e.ec, err = e.in.NewContext(ctx, framecrypt.ContextConfig{
-		E2eeMandated: true,
+		E2eeMandated: cfg.Mandated,
 		Identity: framecrypt.IdentityStore{
 			LocalUserID:       cfg.SelfID,
 			LocalDeviceID:     cfg.Identity.DeviceID,
@@ -203,8 +207,8 @@ func newGroupE2ee(ctx context.Context, rt *framecrypt.Runtime, cfg groupE2eeConf
 	}
 	e.km, err = e.ec.NewKeysManager(ctx, framecrypt.KeysManagerConfig{
 		UserID:          cfg.SelfID,
-		E2eeMandated:    true,
-		InfraMandated:   true,
+		E2eeMandated:    cfg.Mandated,
+		InfraMandated:   cfg.Mandated,
 		SendE2eeMessage: e.queue,
 		// Keys go over signalling only: the bridge never reports a media data channel as ready.
 		SctpSendE2eeMessage: func(to string, _ []byte) {
@@ -236,7 +240,11 @@ func (g *groupCall) startE2ee(localSDP string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load frame-encryption module: %w", err)
 	}
+	g.lock.Lock()
+	mandated := g.e2ee
+	g.lock.Unlock()
 	e, state, err := newGroupE2ee(g.ctx, rt, groupE2eeConfig{
+		Mandated:      mandated,
 		SelfID:        strconv.FormatInt(g.m.selfFBID(), 10),
 		Identity:      g.m.callIdentity(),
 		LocalCname:    callbridge.SSRCCname(localSDP),
@@ -349,8 +357,10 @@ func (e *groupE2ee) serverState(store rtcsignal.StateStore, from string) {
 	e.log.Info().Str("from", from).Int("endpoints", endpoints).Int32("error_code", res.ErrorCode).
 		Bool("key_index", res.KeyIndex != "").Dur("key_update_delay", res.KeyUpdateDelay).
 		Msg("Processed the server's E2EE state")
-	if res.ErrorCode != 0 {
-		e.log.Warn().Int32("error_code", res.ErrorCode).Msg("End-to-end encryption was negotiated off; media is dropped until it's back on")
+	if res.ErrorCode != 0 && e.cfg.Mandated {
+		e.log.Warn().Int32("error_code", res.ErrorCode).Msg("End-to-end encryption was negotiated off in an encrypted chat; media is dropped until it's back on")
+	} else if res.ErrorCode != 0 {
+		e.log.Info().Int32("error_code", res.ErrorCode).Msg("End-to-end encryption negotiated off; media goes through unencrypted")
 	}
 }
 

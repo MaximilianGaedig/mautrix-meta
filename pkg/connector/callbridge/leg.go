@@ -322,15 +322,9 @@ func (l *Leg) addLocalTrack() error {
 		return err
 	}
 	l.sender = sender
-	// Drain RTCP so the interceptors (reports, NACK) keep working.
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			if _, _, err := sender.Read(buf); err != nil {
-				return
-			}
-		}
-	}()
+	// Drain RTCP so the interceptors (reports, NACK) keep working, logging how the other side
+	// receives our audio.
+	go l.readAudioRTCP(sender)
 	if l.LocalVideo != nil {
 		vsender, err := l.PC.AddTrack(l.LocalVideo)
 		if err != nil {
@@ -407,6 +401,40 @@ func (l *Leg) RollbackOffer() {
 
 // readVideoRTCP drains the video sender's RTCP and reports the receiver's
 // keyframe requests (PLI/FIR), which the relay passes on to the sending peer.
+// readAudioRTCP drains the audio sender's RTCP and logs the receiver reports about our audio (every
+// 5 s at most): the loss and jitter the other side sees.
+func (l *Leg) readAudioRTCP(sender *webrtc.RTPSender) {
+	var last time.Time
+	nacks := 0
+	for {
+		pkts, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		for _, pkt := range pkts {
+			var reports []rtcp.ReceptionReport
+			switch p := pkt.(type) {
+			case *rtcp.ReceiverReport:
+				reports = p.Reports
+			case *rtcp.SenderReport:
+				reports = p.Reports
+			case *rtcp.TransportLayerNack:
+				nacks += len(p.Nacks)
+			}
+			for _, r := range reports {
+				if time.Since(last) < 5*time.Second {
+					continue
+				}
+				last = time.Now()
+				l.log.Debug().Uint32("ssrc", r.SSRC).Float64("fraction_lost", float64(r.FractionLost)/256).
+					Uint32("total_lost", r.TotalLost).Float64("jitter_ms", float64(r.Jitter)/48).
+					Uint32("highest_seq", r.LastSequenceNumber).Int("nacked", nacks).
+					Msg("Receiver report on our audio")
+			}
+		}
+	}
+}
+
 func (l *Leg) readVideoRTCP(sender *webrtc.RTPSender) {
 	for {
 		pkts, _, err := sender.ReadRTCP()

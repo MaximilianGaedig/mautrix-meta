@@ -264,10 +264,7 @@ func (cb *callBridge) startOutgoingGroup(ctx context.Context, portal *bridgev2.P
 // needs the bridge's Messenger encryption device and Meta's frame-encryption module, which starts
 // loading here (it's needed for the JOIN).
 func (g *groupCall) canBridgeMedia() bool {
-	if !g.e2ee {
-		return true
-	}
-	if g.m.callIdentity() == nil {
+	if g.m.callIdentity() == nil && g.e2ee {
 		g.log.Info().Msg("End-to-end encrypted group call, but the bridge has no Messenger encryption device")
 		g.end("The bridge has no Messenger encryption device, so it can't join this encrypted call")
 		return false
@@ -557,14 +554,18 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 	cc := rtcsignal.NewCallContext(strconv.FormatInt(g.m.selfFBID(), 10), g.conference, g.serverInfoData)
 	e2ee := g.e2ee
 	g.lock.Unlock()
+	// Frame encryption runs in every SFU call, as in the web client: Messenger negotiates it on
+	// for unencrypted chats too when all clients support it.
 	e2eeState := g.m.callE2eeState()
 	var crypt *groupE2ee
-	if e2ee {
-		if e2eeState, err = g.startE2ee(offer); err != nil {
-			g.log.Err(err).Msg("Failed to set up end-to-end encryption for the group call")
-			g.end("The bridge couldn't set up end-to-end encryption for this Messenger group call")
-			return
-		}
+	if state, err := g.startE2ee(offer); err != nil && e2ee {
+		g.log.Err(err).Msg("Failed to set up end-to-end encryption for the group call")
+		g.end("The bridge couldn't set up end-to-end encryption for this Messenger group call")
+		return
+	} else if err != nil {
+		g.log.Warn().Err(err).Msg("Failed to set up frame encryption, joining without it")
+	} else {
+		e2eeState = state
 		g.lock.Lock()
 		crypt = g.crypt
 		g.lock.Unlock()
@@ -703,7 +704,9 @@ func (g *groupCall) handleSignal(msg *rtcsignal.Message) *rtcsignal.Message {
 		if dm.Topic == rtcsignal.TopicE2eeKey && crypt != nil {
 			crypt.keyMessage(dm)
 		} else {
-			g.log.Debug().Str("topic", dm.Topic).Msg("Group call data message")
+			g.log.Info().Str("topic", dm.Topic).Str("topic_deprecated", dm.TopicDeprecated).Str("sender", dm.Sender).
+				Str("sender_e2ee_id", dm.SenderE2eeID).Int("data_len", len(dm.Data)).Int("e2e_encrypted_len", len(dm.E2eEncryptedData)).
+				Bool("other_body", dm.HasOtherBodyMember).Msg("Group call data message")
 		}
 	}
 	return g.respond(msg, rtcsignal.DefaultResponseBody(msg))

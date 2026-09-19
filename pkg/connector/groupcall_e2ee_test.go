@@ -73,7 +73,10 @@ func e2eeTestRuntime(t *testing.T) *framecrypt.Runtime {
 // e2eeSFU plays Messenger's SFU for groupE2ee members: it hands each an E2eeServerState listing
 // the others, and relays E2eeKey messages by user id.
 type e2eeSFU struct {
-	t       *testing.T
+	t *testing.T
+	// open: the members are in an unencrypted chat (not mandated), which Messenger still
+	// negotiates encryption on for.
+	open    bool
 	lock    sync.Mutex
 	members map[string]*e2eeMember
 	sent    int
@@ -112,6 +115,7 @@ func (s *e2eeSFU) join(uid, cname string, devID int32, trust func(string, int32,
 		trustFn = func(_ context.Context, u string, d int32, k []byte) bool { return trust(u, d, k) }
 	}
 	e, raw, err := newGroupE2ee(context.Background(), e2eeTestRuntime(t), groupE2eeConfig{
+		Mandated:      !s.open,
 		SelfID:        uid,
 		Identity:      &callbridge.Identity{DeviceID: devID, Priv: kp.PrivateKey().Serialize(), Pub: kp.PublicKey().PublicKey()},
 		LocalCname:    cname,
@@ -469,4 +473,21 @@ func TestFrameCryptLoaderLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = in.Close(ctx)
+}
+
+// TestGroupE2eeUnencryptedChat: in a call in an unencrypted chat, keys are still exchanged and frames
+// encrypted once the server negotiates encryption on, as the web client does.
+func TestGroupE2eeUnencryptedChat(t *testing.T) {
+	sfu := newE2eeSFU(t)
+	sfu.open = true
+	bridge := sfu.join("100000000000001", "0a6b7c4e-2f1d-4e0a-9b3c-5d6e7f8091a2", 3, nil)
+	web := sfu.join("100000000000002", "hZvKyjdfjh6GgP1x", 7, nil)
+	sfu.pushState()
+	if !waitDecryptable(t, web, bridge, 10*time.Second) || !waitDecryptable(t, bridge, web, 10*time.Second) {
+		t.Fatal("keys weren't exchanged in an unencrypted chat's call")
+	}
+	ct, err := bridge.e.encryptTransform(zerolog.Nop())([]byte("plain frame"))
+	if err != nil || bytes.Equal(ct, []byte("plain frame")) {
+		t.Fatalf("the bridge's frame went out unencrypted (err %v)", err)
+	}
 }
