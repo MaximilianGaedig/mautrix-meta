@@ -737,3 +737,92 @@ func TestSimulcastFirstOffer(t *testing.T) {
 		t.Fatalf("answering the prepared offer: %v", err)
 	}
 }
+
+// The live failure: our camera offer was rejected (CLIENT_MEDIA_UPDATE 409),
+// leaving the leg in have-local-offer, so Messenger's own camera offer then
+// failed with an invalid signaling state transition. Our pending offer must
+// yield to theirs, and each new offer must carry a higher o= version (the
+// CLIENT_MEDIA_UPDATE version).
+func TestRenegotiationGlareAndVersion(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	mk := func(name string) *Leg {
+		l, err := NewLeg(LegConfig{Name: name, AllowVideo: true, Settings: loopbackSettings(), Log: zerolog.Nop()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(l.Close)
+		return l
+	}
+	bridge, phone := mk("bridge"), mk("phone")
+	connect(t, ctx, bridge, phone)
+	v0, err := SDPVersion(bridge.PC.LocalDescription().SDP)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Our camera offer, never answered (Messenger rejected it).
+	if err = bridge.AddVideoTrack(webrtc.MimeTypeVP8); err != nil {
+		t.Fatal(err)
+	}
+	ours, err := bridge.Renegotiate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1, err := SDPVersion(ours)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v1 <= v0 {
+		t.Fatalf("offer version %d not above the previous %d", v1, v0)
+	}
+
+	// Meanwhile the phone turns its camera on: its offer must still apply.
+	if err = phone.AddVideoTrack(webrtc.MimeTypeVP8); err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := phone.Renegotiate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err := bridge.AnswerRenegotiation(theirs)
+	if err != nil {
+		t.Fatalf("answering the peer's offer while ours was pending: %v", err)
+	}
+	if err = phone.SetAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+
+	// And our camera can be offered again afterwards (a retry after the
+	// rejection), this time answered and applied.
+	again, err := bridge.Renegotiate()
+	if err != nil {
+		t.Fatalf("re-offering after the glare: %v", err)
+	}
+	if v2, _ := SDPVersion(again); v2 <= v1 {
+		t.Fatalf("retry version %d not above %d", v2, v1)
+	}
+	if !strings.Contains(again, "a=candidate:") {
+		t.Fatal("renegotiation offer without ICE candidates")
+	}
+	reply, err := phone.AnswerRenegotiation(again)
+	if err != nil {
+		t.Fatalf("phone answering the retry: %v", err)
+	}
+	if err = bridge.SetAnswer(reply); err != nil {
+		t.Fatalf("applying the retry's answer: %v", err)
+	}
+	if bridge.PC.SignalingState() != webrtc.SignalingStateStable {
+		t.Fatalf("signaling state %s", bridge.PC.SignalingState())
+	}
+}
+
+func TestSDPVersion(t *testing.T) {
+	v, err := SDPVersion("v=0\r\no=- 4611731400430051336 7 IN IP4 127.0.0.1\r\ns=-\r\n")
+	if err != nil || v != 7 {
+		t.Fatalf("got %d, %v", v, err)
+	}
+	if _, err = SDPVersion("v=0\r\ns=-\r\n"); err == nil {
+		t.Fatal("expected an error without an o= line")
+	}
+}

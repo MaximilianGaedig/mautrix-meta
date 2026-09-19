@@ -323,8 +323,6 @@ type callSession struct {
 	rtcUserPresent bool
 	rtcVideoIntent bool // ring as a video call
 
-	// clientMediaVersion is our media state version for CLIENT_MEDIA_UPDATE.
-	clientMediaVersion int64
 	// Messenger's camera: its SSRC (for keyframe requests), when we last asked, and whether it was on.
 	metaVideoSSRC    webrtc.SSRC
 	metaKeyframeAt   time.Time

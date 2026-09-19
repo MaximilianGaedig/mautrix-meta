@@ -643,11 +643,6 @@ func (cb *callBridge) handleRTCDecline(evt *event.Event) {
 func (s *callSession) sendMetaVideo(mime string) error {
 	s.lock.Lock()
 	leg, cc := s.metaLeg, s.cc
-	if s.clientMediaVersion < 1 {
-		s.clientMediaVersion = 1 // the JOIN's media state
-	}
-	s.clientMediaVersion++
-	version := s.clientMediaVersion
 	s.lock.Unlock()
 	if leg == nil || cc == nil {
 		return errors.New("not in the Messenger call")
@@ -662,13 +657,20 @@ func (s *callSession) sendMetaVideo(mime string) error {
 	if err != nil {
 		return fmt.Errorf("create video offer: %w", err)
 	}
+	// The media state version is the offer's o= session version, like the web client.
+	version, err := callbridge.SDPVersion(offer)
+	if err != nil {
+		leg.RollbackOffer()
+		return fmt.Errorf("video offer version: %w", err)
+	}
 	tracks := map[string]rtcsignal.TrackInfo{
 		leg.TrackID:      {Enabled: true, Label: rtcsignal.TrackLabelAudio},
 		leg.VideoTrackID: {Enabled: true, Label: rtcsignal.TrackLabelVideo},
 	}
 	resp, err := s.cb.sig.Request(s.ctx, cc.NewClientMediaUpdate(version, tracks, offer))
 	if err != nil {
-		return fmt.Errorf("CLIENT_MEDIA_UPDATE: %w", err)
+		leg.RollbackOffer()
+		return fmt.Errorf("CLIENT_MEDIA_UPDATE (version %d): %w", version, err)
 	}
 	s.lock.Lock()
 	s.videoCodec = mime

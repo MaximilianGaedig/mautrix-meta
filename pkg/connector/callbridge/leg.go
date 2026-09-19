@@ -98,6 +98,11 @@ type Leg struct {
 	onCandidate func(*webrtc.ICECandidateInit)
 	onState     func(webrtc.PeerConnectionState)
 	gathered    chan struct{}
+	// unappliedOffer is a mid-call offer sent but not yet answered. It is
+	// applied (SetLocalDescription) only together with its answer: Pion
+	// has no rollback, so an offer the peer rejects or talks over would
+	// otherwise leave the connection stuck in have-local-offer.
+	unappliedOffer string
 }
 
 // NewLeg creates a PeerConnection with Opus audio (and, for WebShape, the
@@ -303,17 +308,31 @@ func (l *Leg) AddVideoTrack(mime string) error {
 	return nil
 }
 
-// Renegotiate makes and applies a new local offer on an established
-// connection (after AddVideoTrack); candidates are already in place.
+// Renegotiate makes a new local offer on an established connection (e.g.
+// after AddVideoTrack), with the connection's ICE candidates in it. The offer
+// is applied when its answer arrives (SetAnswer); dropping it (RollbackOffer,
+// or the peer's own offer winning in AnswerRenegotiation) needs no undo.
 func (l *Leg) Renegotiate() (string, error) {
+	cur := l.PC.CurrentLocalDescription()
+	if cur == nil {
+		return "", errors.New("renegotiating before the first negotiation finished")
+	}
 	offer, err := l.PC.CreateOffer(nil)
 	if err != nil {
 		return "", err
 	}
-	if err = l.PC.SetLocalDescription(offer); err != nil {
-		return "", err
-	}
-	return l.PC.LocalDescription().SDP, nil
+	l.lock.Lock()
+	l.unappliedOffer = offer.SDP
+	l.lock.Unlock()
+	return WithCandidatesFrom(offer.SDP, cur.SDP), nil
+}
+
+// RollbackOffer drops a local offer the peer never answered (rejected or
+// superseded), so the connection can take the next offer either way.
+func (l *Leg) RollbackOffer() {
+	l.lock.Lock()
+	l.unappliedOffer = ""
+	l.lock.Unlock()
 }
 
 // readVideoRTCP drains the video sender's RTCP and reports the receiver's
@@ -428,8 +447,18 @@ func (l *Leg) AnswerOffer(offer string) (string, error) {
 	return l.PC.LocalDescription().SDP, nil
 }
 
-// SetAnswer applies the remote answer to our offer.
+// SetAnswer applies the remote answer to our offer (applying a mid-call
+// offer from Renegotiate first).
 func (l *Leg) SetAnswer(answer string) error {
+	l.lock.Lock()
+	offer := l.unappliedOffer
+	l.unappliedOffer = ""
+	l.lock.Unlock()
+	if offer != "" {
+		if err := l.PC.SetLocalDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
+			return fmt.Errorf("apply our offer: %w", err)
+		}
+	}
 	return l.setRemote(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer})
 }
 
@@ -531,6 +560,10 @@ func (l *Leg) adaptRemote(sdp string) (string, map[string]string) {
 // AnswerRenegotiation answers a mid-call offer, adapting a Plan B one from Messenger's mobile
 // apps to a Unified Plan leg, and returns the answer in the peer's own terms.
 func (l *Leg) AnswerRenegotiation(offer string) (string, error) {
+	// Glare: the peer's offer wins over one of ours still waiting for an
+	// answer (Messenger can reject ours or never answer it); ours was never
+	// applied, so dropping it is enough.
+	l.RollbackOffer()
 	offer, mapping := l.adaptRemote(offer)
 	answer, err := l.AnswerOffer(offer)
 	if err != nil {

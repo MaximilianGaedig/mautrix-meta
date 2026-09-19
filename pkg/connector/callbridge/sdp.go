@@ -17,6 +17,8 @@
 package callbridge
 
 import (
+	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
@@ -432,4 +434,59 @@ func AdaptPlanBOffer(offer, local string) (string, map[string]string) {
 	offer = CollapseSimulcast(offer)
 	mapping := PlanBToUnifiedMIDs(offer, local)
 	return RenameMIDs(offer, mapping), mapping
+}
+
+// SDPVersion is the session version from the o= line, which Messenger's
+// clients use as the media state version of a CLIENT_MEDIA_UPDATE carrying
+// that SDP (web client getSdpVersion: line 2, third token).
+func SDPVersion(sdp string) (int64, error) {
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "o=") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			return 0, fmt.Errorf("short o= line: %d fields", len(f))
+		}
+		return strconv.ParseInt(f[2], 10, 64)
+	}
+	return 0, errors.New("no o= line")
+}
+
+// WithCandidatesFrom copies the ICE candidate lines of `from` (the current
+// local description) into every media section of `offer` that has none, the
+// way Pion's LocalDescription fills them in: CreateOffer's SDP has none, and
+// a renegotiation reuses the same ICE session.
+func WithCandidatesFrom(offer, from string) string {
+	var cands []string
+	inMedia := false
+	for _, line := range strings.Split(from, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "m=") {
+			if inMedia && len(cands) > 0 {
+				break // the first media section's candidates (all of them under BUNDLE)
+			}
+			inMedia = true
+			continue
+		}
+		if inMedia && (strings.HasPrefix(line, "a=candidate:") || line == "a=end-of-candidates") {
+			cands = append(cands, line)
+		}
+	}
+	if len(cands) == 0 {
+		return offer
+	}
+	sections := strings.Split(offer, "\r\nm=")
+	for i := 1; i < len(sections); i++ {
+		if strings.Contains(sections[i], "\r\na=candidate:") {
+			continue
+		}
+		sec := strings.TrimSuffix(sections[i], "\r\n")
+		sections[i] = sec + "\r\n" + strings.Join(cands, "\r\n")
+		if i < len(sections)-1 || strings.HasSuffix(offer, "\r\n") {
+			sections[i] += "\r\n"
+		}
+	}
+	return strings.Join(sections, "\r\nm=")
 }
