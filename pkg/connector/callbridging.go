@@ -703,7 +703,17 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 		log.Debug().Msg("Ring for a call placed by the user, ignoring")
 		return
 	}
-	if ring.Offer == nil || ring.Offer.SDP == "" {
+	// A ring can carry the caller's offer twice: `offer` as the caller made
+	// it (Plan B from Messenger's mobile apps) and `unifiedOffer` (field 14),
+	// which browsers, being Unified Plan only, have to use. Prefer the
+	// unified one; Plan B still works through Pion's fallback.
+	offerSDP, offerKind := "", "offer"
+	if ring.UnifiedOffer != nil && ring.UnifiedOffer.SDP != "" {
+		offerSDP, offerKind = ring.UnifiedOffer.SDP, "unified_offer"
+	} else if ring.Offer != nil {
+		offerSDP = ring.Offer.SDP
+	}
+	if offerSDP == "" {
 		log.Info().Int32("ring_type", int32(ring.RingType)).Int32("media_path", int32(ring.MediaPath)).
 			Msg("Ring without a P2P offer (group call?), not bridging; stage (a) notices still apply")
 		return
@@ -725,10 +735,10 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 	s.lock.Lock()
 	s.conference = msg.Header.ConferenceName
 	s.serverInfoData = msg.Header.ServerInfoData
-	s.ringOffer = ring.Offer.SDP
+	s.ringOffer = offerSDP
 	s.ringRelay = ring.RelayInfo
-	if ring.RingType == rtcsignal.RingPeerVideo || callbridge.SendsVideo(ring.Offer.SDP) {
-		s.videoCodec = callbridge.PickVideoCodec(ring.Offer.SDP)
+	if ring.RingType == rtcsignal.RingPeerVideo || callbridge.SendsVideo(offerSDP) {
+		s.videoCodec = callbridge.PickVideoCodec(offerSDP)
 	}
 	s.e2ee = ring.E2eeEnforcement == nil || ring.E2eeEnforcement.Mode == rtcsignal.E2eeMandated
 	s.lock.Unlock()
@@ -740,8 +750,13 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 		Bool("relay_info", ring.RelayInfo != nil).
 		Int16("retry", msg.Header.RetryCount).
 		Msg("Ringing Matrix for incoming Messenger call")
-	callbridge.LogSDPShape(s.log.Debug(), ring.Offer.SDP).Msg("Messenger offer")
-	if err = s.verifyPeerSDP(ring.Offer.SDP, caller); err != nil {
+	callbridge.LogSDPShape(s.log.Info(), offerSDP).
+		Str("offer_kind", offerKind).
+		Bool("has_plain_offer", ring.Offer != nil && ring.Offer.SDP != "").
+		Bool("has_unified_offer", ring.UnifiedOffer != nil && ring.UnifiedOffer.SDP != "").
+		Bool("legacy_call", ring.IsLegacyCall).
+		Msg("Messenger offer")
+	if err = s.verifyPeerSDP(offerSDP, caller); err != nil {
 		s.log.Warn().Err(err).Msg("Caller's x-dtls-auth doesn't verify, not bridging")
 		s.end(endFailed, "")
 		return
