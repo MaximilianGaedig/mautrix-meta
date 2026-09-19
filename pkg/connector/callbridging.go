@@ -325,6 +325,10 @@ type callSession struct {
 
 	// clientMediaVersion is our media state version for CLIENT_MEDIA_UPDATE.
 	clientMediaVersion int64
+	// Messenger's camera: its SSRC (for keyframe requests), when we last asked, and whether it was on.
+	metaVideoSSRC    webrtc.SSRC
+	metaKeyframeAt   time.Time
+	peerVideoEnabled map[string]bool
 
 	endOnce sync.Once
 }
@@ -485,6 +489,27 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 			Int32("paused_down", ti.PausedDownlink).
 			Str("owner", ti.Owner).
 			Int32("label", ti.Label))
+	}
+	// Messenger pauses a camera that's turned off and resumes the same track: a keyframe makes the
+	// picture come back instead of freezing on the last frame.
+	resumed := false
+	s.lock.Lock()
+	if s.peerVideoEnabled == nil {
+		s.peerVideoEnabled = map[string]bool{}
+	}
+	for id, ti := range smu.MediaStatus {
+		if ti.Label != rtcsignal.TrackLabelVideo {
+			continue
+		}
+		if was, known := s.peerVideoEnabled[id]; ti.Enabled && known && !was {
+			resumed = true
+		}
+		s.peerVideoEnabled[id] = ti.Enabled
+	}
+	s.lock.Unlock()
+	if resumed && s.rtcMode {
+		s.log.Info().Msg("Messenger camera resumed, requesting keyframes")
+		s.requestMetaKeyframeBurst()
 	}
 	s.lock.Lock()
 	ours := []string{}

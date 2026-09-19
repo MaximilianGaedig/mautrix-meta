@@ -96,7 +96,7 @@ type RelayStats struct {
 // Packets whose payload type is not srcOpusPT (RED, CN, DTMF) are dropped,
 // since only Opus is negotiated on the other leg.
 func Relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger) error {
-	return relay(ctx, src, srcOpusPT, dst, stats, log, Rewriter{}, "audio")
+	return relay(ctx, src, srcOpusPT, dst, stats, log, &Rewriter{}, "audio")
 }
 
 // VideoFrameTicks is one frame at 30 fps on the 90 kHz video clock.
@@ -106,10 +106,16 @@ const VideoFrameTicks = 3000
 // retransmissions under their own payload type are dropped, the receiving
 // leg's NACK responder resends from its own buffer) from src to dst.
 func RelayVideo(ctx context.Context, src RTPReader, srcPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger) error {
-	return relay(ctx, src, srcPT, dst, stats, log, Rewriter{FrameTicks: VideoFrameTicks}, "video")
+	return relay(ctx, src, srcPT, dst, stats, log, &Rewriter{FrameTicks: VideoFrameTicks}, "video")
 }
 
-func relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw Rewriter, kind string) error {
+// RelayVideoWith relays like RelayVideo through rw, which keeps the outgoing stream continuous when
+// the next source track (a camera turned off and on again) is relayed with the same rewriter.
+func RelayVideoWith(ctx context.Context, src RTPReader, srcPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw *Rewriter) error {
+	return relay(ctx, src, srcPT, dst, stats, log, rw, "video")
+}
+
+func relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw *Rewriter, kind string) error {
 	loggedFirst := false
 	for {
 		if ctx.Err() != nil {

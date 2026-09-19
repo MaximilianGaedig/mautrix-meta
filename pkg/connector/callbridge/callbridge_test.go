@@ -684,3 +684,56 @@ func TestPlanBRenegotiationOnUnifiedLeg(t *testing.T) {
 		t.Fatalf("read: %v %v", p, err)
 	}
 }
+
+// TestSimulcastFirstOffer: Messenger's mobile video call rings with simulcast layers in the video
+// section but Unified Plan mids. Pion rejects that as Plan B on a Unified Plan leg; after
+// PrepareMetaRemoteSDP (one layer) it answers.
+func TestSimulcastFirstOffer(t *testing.T) {
+	mk := func(name string) *Leg {
+		l, err := NewLeg(LegConfig{Name: name, AllowVideo: true, VideoCodec: webrtc.MimeTypeVP8, Settings: loopbackSettings(), Log: zerolog.Nop()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(l.Close)
+		return l
+	}
+	withSimulcast := func(offer string) string {
+		var b strings.Builder
+		inVideo, added := false, false
+		for _, line := range strings.SplitAfter(offer, "\n") {
+			if strings.HasPrefix(line, "m=") {
+				inVideo = strings.HasPrefix(line, "m=video")
+			}
+			if inVideo && !added && strings.HasPrefix(line, "a=ssrc:") {
+				primary := strings.Fields(line[len("a=ssrc:"):])[0]
+				b.WriteString("a=ssrc-group:SIM " + primary + " 1111 2222\r\n")
+				b.WriteString(line)
+				for _, s := range []string{"1111", "2222"} {
+					b.WriteString("a=ssrc:" + s + " cname:layer\r\na=ssrc:" + s + " msid:stream layer" + s + "\r\n")
+				}
+				added = true
+				continue
+			}
+			b.WriteString(line)
+		}
+		if !added {
+			t.Fatal("no video ssrc")
+		}
+		return b.String()
+	}
+	phone := mk("phone")
+	if err := phone.AddVideoTrack(webrtc.MimeTypeVP8); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := phone.CreateOffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer = withSimulcast(offer)
+	if _, err = mk("raw").AnswerOffer(offer); err == nil {
+		t.Fatal("expected Pion to reject the simulcast offer as it is")
+	}
+	if _, err = mk("bridge").AnswerOffer(PrepareMetaRemoteSDP(offer)); err != nil {
+		t.Fatalf("answering the prepared offer: %v", err)
+	}
+}

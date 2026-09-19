@@ -80,7 +80,9 @@ func PrepareMetaLocalSDP(sdp string, id *Identity, video bool) (string, error) {
 // PrepareMetaRemoteSDP removes the attributes a WebRTC stack must not see,
 // like the web client does before setRemoteDescription.
 func PrepareMetaRemoteSDP(sdp string) string {
-	return rtcsignal.StripDtlsAuth(sdp)
+	// One layer per section: Pion takes simulcast layers as separate tracks, which a Unified Plan
+	// connection rejects as Plan B (Messenger's mobile video, in the first offer and later ones).
+	return CollapseSimulcast(rtcsignal.StripDtlsAuth(sdp))
 }
 
 // AudioTrackID returns the msid track id of the first audio m-line, which is

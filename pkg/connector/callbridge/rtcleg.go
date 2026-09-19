@@ -26,6 +26,8 @@ import (
 	"github.com/livekit/protocol/livekit"
 	protoLogger "github.com/livekit/protocol/logger"
 	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
 )
@@ -49,7 +51,7 @@ type RTCLeg struct {
 	audio *webrtc.TrackLocalStaticRTP
 
 	mu          sync.Mutex
-	video       *webrtc.TrackLocalStaticRTP
+	video       *lksdk.LocalTrack
 	remoteAudio chan *webrtc.TrackRemote
 	remoteVideo chan *webrtc.TrackRemote
 	owners      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant
@@ -135,9 +137,16 @@ func (l *RTCLeg) AddVideoTrack(mime string) (RTPWriter, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.video != nil {
-		return l.video, nil
+		return localTrackWriter{l.video}, nil
 	}
-	video, err := webrtc.NewTrackLocalStaticRTP(videoCapability(mime), "video", "bridge")
+	// A LiveKit LocalTrack rather than a static one: it hands us the subscribers' keyframe requests
+	// (PLI/FIR), which the SDK otherwise swallows.
+	video, err := lksdk.NewLocalTrack(videoCapability(mime), lksdk.WithRTCPHandler(func(p rtcp.Packet) {
+		switch p.(type) {
+		case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+			l.requestKeyframe()
+		}
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -148,8 +157,13 @@ func (l *RTCLeg) AddVideoTrack(mime string) (RTPWriter, error) {
 		return nil, fmt.Errorf("publish video: %w", err)
 	}
 	l.video = video
-	return video, nil
+	return localTrackWriter{video}, nil
 }
+
+// localTrackWriter adapts a LiveKit LocalTrack to RTPWriter.
+type localTrackWriter struct{ t *lksdk.LocalTrack }
+
+func (w localTrackWriter) WriteRTP(p *rtp.Packet) error { return w.t.WriteRTP(p, nil) }
 
 // RemoteAudio waits for the first Matrix participant's microphone.
 func (l *RTCLeg) RemoteAudio(ctx context.Context) (*webrtc.TrackRemote, error) {

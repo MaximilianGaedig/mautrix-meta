@@ -435,50 +435,115 @@ func (s *callSession) startRTCRelay() {
 	})
 }
 
-// relayMetaVideoToRTC publishes Messenger's camera (whenever it starts) into the call.
+// relayMetaVideoToRTC publishes Messenger's camera into the call, whenever it starts and each time
+// it restarts (a new track), through one rewriter so the published stream stays continuous.
 func (s *callSession) relayMetaVideoToRTC(metaLeg *callbridge.Leg, rtc *callbridge.RTCLeg) {
-	tr, err := metaLeg.RemoteVideoTrack(s.ctx)
-	if err != nil {
-		return
-	}
-	dst, err := rtc.AddVideoTrack(tr.Codec().MimeType)
-	if err != nil {
-		s.log.Warn().Err(err).Msg("Failed to publish Messenger video")
-		return
-	}
-	ssrc := tr.SSRC()
-	rtc.OnKeyframeRequest(func() { metaLeg.RequestKeyframe(ssrc) })
-	metaLeg.RequestKeyframe(ssrc)
-	var stats callbridge.RelayStats
-	rlog := s.log.With().Str("from", "messenger").Str("codec", tr.Codec().MimeType).Logger()
-	err = callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), dst, &stats, rlog)
-	rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Video relay stopped")
-}
-
-// relayRTCVideoToMeta sends the Matrix user's camera to Messenger (video calls only).
-func (s *callSession) relayRTCVideoToMeta(rtc *callbridge.RTCLeg, metaLeg *callbridge.Leg) {
-	tr, err := rtc.RemoteVideo(s.ctx)
-	if err != nil {
-		return
-	}
-	if metaLeg.LocalVideo == nil {
-		// An audio call: add video on the Messenger side first.
-		if err = s.sendMetaVideo(tr.Codec().MimeType); err != nil {
-			s.log.Err(err).Msg("Failed to turn on video towards Messenger")
+	var dst callbridge.RTPWriter
+	rw := &callbridge.Rewriter{FrameTicks: callbridge.VideoFrameTicks}
+	rtc.OnKeyframeRequest(s.requestMetaKeyframe)
+	for s.ctx.Err() == nil {
+		tr, err := metaLeg.RemoteVideoTrack(s.ctx)
+		if err != nil {
 			return
 		}
+		if dst == nil {
+			if dst, err = rtc.AddVideoTrack(tr.Codec().MimeType); err != nil {
+				s.log.Warn().Err(err).Msg("Failed to publish Messenger video")
+				return
+			}
+		}
+		s.lock.Lock()
+		s.metaVideoSSRC = tr.SSRC()
+		s.lock.Unlock()
+		s.requestMetaKeyframeBurst()
+		var stats callbridge.RelayStats
+		rlog := s.log.With().Str("from", "messenger").Str("codec", tr.Codec().MimeType).Logger()
+		err = callbridge.RelayVideoWith(s.ctx, tr, uint8(tr.PayloadType()), dst, &stats, rlog, rw)
+		rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Video relay stopped")
 	}
-	if got, want := tr.Codec().MimeType, s.videoCodec; !strings.EqualFold(got, want) {
-		s.log.Warn().Str("matrix_codec", got).Str("messenger_codec", want).
-			Msg("The Element call's video codec differs from Messenger's, not relaying video")
+}
+
+// requestMetaKeyframe asks Messenger for a keyframe of its camera (at most every 500 ms).
+func (s *callSession) requestMetaKeyframe() {
+	s.lock.Lock()
+	leg, ssrc := s.metaLeg, s.metaVideoSSRC
+	now := time.Now()
+	if leg == nil || ssrc == 0 || now.Sub(s.metaKeyframeAt) < 500*time.Millisecond {
+		s.lock.Unlock()
 		return
 	}
-	metaLeg.OnKeyframeRequest(func() { rtc.RequestKeyframe(tr) })
-	rtc.RequestKeyframe(tr)
-	var stats callbridge.RelayStats
-	rlog := s.log.With().Str("from", "matrixrtc").Str("codec", tr.Codec().MimeType).Logger()
-	err = callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), metaLeg.LocalVideo, &stats, rlog)
-	rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Video relay stopped")
+	s.metaKeyframeAt = now
+	s.lock.Unlock()
+	leg.RequestKeyframe(ssrc)
+}
+
+// requestMetaKeyframeBurst asks for keyframes a few times over two seconds, so a (re)started camera's
+// picture appears without waiting for the sender's next periodic keyframe.
+func (s *callSession) requestMetaKeyframeBurst() {
+	go func() {
+		for _, d := range []time.Duration{0, 600 * time.Millisecond, 600 * time.Millisecond, time.Second} {
+			time.Sleep(d)
+			if s.ctx.Err() != nil {
+				return
+			}
+			s.requestMetaKeyframe()
+		}
+	}()
+}
+
+// relayRTCVideoToMeta sends the Matrix user's camera to Messenger: turning video on in an audio call
+// first, and following each new track when the camera is turned off and on again (LiveKit publishes
+// a new one), through one rewriter so Messenger sees a continuous stream.
+func (s *callSession) relayRTCVideoToMeta(rtc *callbridge.RTCLeg, metaLeg *callbridge.Leg) {
+	rw := &callbridge.Rewriter{FrameTicks: callbridge.VideoFrameTicks}
+	var current *webrtc.TrackRemote
+	var curLock sync.Mutex
+	var lastPLI time.Time
+	metaLeg.OnKeyframeRequest(func() {
+		curLock.Lock()
+		tr := current
+		if tr == nil || time.Since(lastPLI) < 500*time.Millisecond {
+			curLock.Unlock()
+			return
+		}
+		lastPLI = time.Now()
+		curLock.Unlock()
+		rtc.RequestKeyframe(tr)
+	})
+	for s.ctx.Err() == nil {
+		tr, err := rtc.RemoteVideo(s.ctx)
+		if err != nil {
+			return
+		}
+		if metaLeg.LocalVideo == nil {
+			// An audio call: add video on the Messenger side first.
+			if err = s.sendMetaVideo(tr.Codec().MimeType); err != nil {
+				s.log.Err(err).Msg("Failed to turn on video towards Messenger")
+				return
+			}
+		}
+		if got, want := tr.Codec().MimeType, s.videoCodec; !strings.EqualFold(got, want) {
+			s.log.Warn().Str("matrix_codec", got).Str("messenger_codec", want).
+				Msg("The Element call's video codec differs from Messenger's, not relaying video")
+			return
+		}
+		curLock.Lock()
+		current = tr
+		curLock.Unlock()
+		go func(tr *webrtc.TrackRemote) {
+			for _, d := range []time.Duration{0, 600 * time.Millisecond, time.Second} {
+				time.Sleep(d)
+				if s.ctx.Err() != nil {
+					return
+				}
+				rtc.RequestKeyframe(tr)
+			}
+		}(tr)
+		var stats callbridge.RelayStats
+		rlog := s.log.With().Str("from", "matrixrtc").Str("codec", tr.Codec().MimeType).Logger()
+		err = callbridge.RelayVideoWith(s.ctx, tr, uint8(tr.PayloadType()), metaLeg.LocalVideo, &stats, rlog, rw)
+		rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Video relay stopped")
+	}
 }
 
 // startOutgoingRTC places a Messenger call for a MatrixRTC call the user started in a DM portal.
