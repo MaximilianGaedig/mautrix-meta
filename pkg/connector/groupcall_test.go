@@ -17,7 +17,14 @@
 package connector
 
 import (
+	"context"
 	"testing"
+	"time"
+
+	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 )
@@ -41,5 +48,31 @@ func TestGroupRingClassification(t *testing.T) {
 	}
 	if !isGroupRing(&rtcsignal.RingRequest{OtherParticipants: []string{"2", "3"}}) {
 		t.Error("a ring with several other participants wasn't taken for a group call")
+	}
+}
+
+// TestNewGroupCallDoesNotDeadlock: newGroupCall used to call markBridged (which takes cb.lock) while
+// holding cb.lock, wedging all call signalling on the first group ring.
+func TestNewGroupCallDoesNotDeadlock(t *testing.T) {
+	cb := &callBridge{log: zerolog.Nop(), m: &MetaClient{}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "555"}}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := cb.newGroupCall(context.Background(), portal, "555", true)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("newGroupCall deadlocked")
+	}
+	if !cb.recentlyBridged(portal.PortalKey) {
+		t.Error("the group call's portal isn't marked as bridged")
+	}
+	if _, err := cb.newGroupCall(context.Background(), portal, "555", true); err != errBusy {
+		t.Errorf("second group call: %v, want errBusy", err)
 	}
 }

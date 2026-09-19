@@ -140,12 +140,14 @@ func (cb *callBridge) newGroupCall(ctx context.Context, portal *bridgev2.Portal,
 		Str("portal_id", string(portal.ID)).
 		Logger()
 	cb.lock.Lock()
-	defer cb.lock.Unlock()
 	if cb.active != nil || cb.group != nil {
+		cb.lock.Unlock()
 		cancel()
 		return nil, errBusy
 	}
 	cb.group = g
+	cb.lock.Unlock()
+	// markBridged takes cb.lock itself.
 	cb.markBridged(portal.PortalKey)
 	return g, nil
 }
