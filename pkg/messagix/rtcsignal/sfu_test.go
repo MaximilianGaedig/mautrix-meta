@@ -120,3 +120,27 @@ func TestNewJoinSFU(t *testing.T) {
 		t.Fatalf("P2P joining_context changed: %s", p2p)
 	}
 }
+
+// TestNewE2eeKeyMessageHAR: our E2eeKey DATA_MESSAGE body encodes byte-for-byte like the web client's.
+func TestNewE2eeKeyMessageHAR(t *testing.T) {
+	for _, hm := range loadHARMessages(t) {
+		dm := hm.Msg.Body.DataMessageRequest
+		if hm.Dir != "send" || dm == nil || dm.Message == nil || dm.Message.Topic != TopicE2eeKey {
+			continue
+		}
+		cc := &CallContext{SelfID: dm.Message.Sender}
+		ours := cc.NewE2eeKeyMessage(dm.Message.Recipients[0], dm.Message.Data).Body.DataMessageRequest
+		want, got := &writer{}, &writer{}
+		want.structBegin()
+		dm.encode(want)
+		want.structEnd()
+		got.structBegin()
+		ours.encode(got)
+		got.structEnd()
+		if string(want.bytes()) != string(got.bytes()) {
+			t.Fatalf("our E2eeKey DATA_MESSAGE body differs from the web client's")
+		}
+		return
+	}
+	t.Fatal("no sent E2eeKey message in the capture")
+}

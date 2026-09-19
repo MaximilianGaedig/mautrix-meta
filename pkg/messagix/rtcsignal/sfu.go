@@ -151,3 +151,20 @@ func (w *writer) groupsOfUsers(id int16, groups []GroupOfUsers) {
 		w.structEnd()
 	}
 }
+
+// TopicE2eeKey is the DATA_MESSAGE topic of end-to-end encrypted calls' key exchange (sender keys and
+// their acks, produced and consumed by the frame-encryption module; ZenonE2eeCore sendE2eeMessageFn).
+const TopicE2eeKey = "E2eeKey"
+
+// NewE2eeKeyMessage builds a DATA_MESSAGE carrying one E2eeKey payload to recipient, shaped like the
+// web client's (sender set, one recipient, an empty serviceRecipients set, no deprecated topic).
+func (c *CallContext) NewE2eeKeyMessage(recipient string, data []byte) *Message {
+	return c.Request(TypeDataMessage, Body{DataMessageRequest: &DataMessageRequest{Message: &DataMessage{
+		Sender:               c.SelfID,
+		Recipients:           []string{recipient},
+		ServiceRecipients:    []int32{},
+		hasServiceRecipients: true,
+		Topic:                TopicE2eeKey,
+		Data:                 data,
+	}}})
+}
