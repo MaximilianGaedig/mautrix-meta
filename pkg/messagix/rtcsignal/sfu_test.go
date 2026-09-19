@@ -144,3 +144,39 @@ func TestNewE2eeKeyMessageHAR(t *testing.T) {
 	}
 	t.Fatal("no sent E2eeKey message in the capture")
 }
+
+// TestCoplayReadyHAR: our post-JOIN coplay UPDATE and the SFU JOIN's coplay state match the web
+// client's in the captured group call.
+func TestCoplayReadyHAR(t *testing.T) {
+	var join, update *Message
+	for _, hm := range loadHARMessages(t) {
+		if hm.Dir != "send" {
+			continue
+		}
+		if hm.Msg.Body.JoinRequest != nil && join == nil {
+			join = hm.Msg
+		}
+		if u := hm.Msg.Body.UpdateRequest; u != nil && u.Topic == "coplay" && update == nil {
+			update = hm.Msg
+		}
+	}
+	if join == nil || update == nil {
+		t.Skip("capture has no SFU JOIN and coplay UPDATE")
+	}
+	st, _ := join.Body.JoinRequest.SyncPayload.StateStore.Get("coplay")
+	ours := (&CallContext{}).NewJoin(&JoinParams{SFU: true, PeerID: "1"})
+	ost, _ := ours.Body.JoinRequest.SyncPayload.StateStore.Get("coplay")
+	if string(st.Data) != string(ost.Data) {
+		t.Errorf("JOIN coplay %x, web client %x", ost.Data, st.Data)
+	}
+	want, got := &writer{}, &writer{}
+	want.structBegin()
+	stateSyncEncoder{m: update.Body.UpdateRequest, member: 30}.encode(want)
+	want.structEnd()
+	got.structBegin()
+	stateSyncEncoder{m: (&CallContext{}).NewCoplayReady().Body.UpdateRequest, member: 30}.encode(got)
+	got.structEnd()
+	if string(want.bytes()) != string(got.bytes()) {
+		t.Errorf("coplay UPDATE differs from the web client's:\n got %x\nwant %x", got.bytes(), want.bytes())
+	}
+}

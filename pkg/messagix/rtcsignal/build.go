@@ -176,6 +176,21 @@ type JoinParams struct {
 // compact struct with i32 field 1 = 0).
 var coplayInitialState = []byte{0x15, 0x00}
 
+// SFU (group call) web clients join with coplay bool field 3 false, and set it right after joining
+// (NewCoplayReady).
+var (
+	coplaySFUInitialState = []byte{0x32, 0x00}
+	coplaySFUReadyState   = []byte{0x31, 0x00}
+)
+
+// NewCoplayReady builds the "coplay" state UPDATE (version 2) a group-call web client sends right
+// after its JOIN; the SFU announced the participants already in the call right after it.
+func (c *CallContext) NewCoplayReady() *Message {
+	return c.Request(TypeUpdate, Body{UpdateRequest: &StateSyncMessage{
+		Topic: "coplay", Version: 2, Data: coplaySFUReadyState, SyncPayload: &SyncPayload{StateStore: StateStore{}},
+	}})
+}
+
 // NewJoin builds a JOIN as the web client sends it in P2P (MWPP) mode:
 // a caller puts its offer in field 1, a callee sends an empty offer struct
 // and its answer in field 14 (ZenonMWThriftJoinTranslator: `offer:{}` is
@@ -231,7 +246,11 @@ func (c *CallContext) NewJoin(p *JoinParams) *Message {
 	if p.Answer != "" {
 		jr.Answer = &SessionDescription{SDP: p.Answer}
 	}
-	store := StateStore{{Topic: "coplay", State: State{Version: 1, Data: coplayInitialState}}}
+	coplay := coplayInitialState
+	if p.SFU {
+		coplay = coplaySFUInitialState
+	}
+	store := StateStore{{Topic: "coplay", State: State{Version: 1, Data: coplay}}}
 	if p.E2eeState != nil {
 		store = append(store, TopicState{Topic: TopicE2eeState, State: State{Version: 1, Data: p.E2eeState}})
 	}

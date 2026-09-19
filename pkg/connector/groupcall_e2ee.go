@@ -349,6 +349,7 @@ func (e *groupE2ee) serverState(store rtcsignal.StateStore, from string) {
 			endpoints++
 		}
 	}
+	e.log.Debug().Str("from", from).Hex("state", st.Data).Msg("Server E2EE state")
 	res, err := e.km.ProcessE2eeServerUpdate(e.ctx, st.Data)
 	if err != nil {
 		e.log.Err(err).Str("from", from).Msg("Frame-encryption module failed on the server's E2EE state")
@@ -424,6 +425,7 @@ func (e *groupE2ee) encryptTransform(log zerolog.Logger) callbridge.FrameTransfo
 	return func(frame []byte) ([]byte, error) {
 		out, err := e.enc.Encrypt(e.ctx, framecrypt.HandlerGeneric, frame)
 		fl.result(err)
+		fl.sample(frame, out)
 		return out, err
 	}
 }
@@ -441,6 +443,7 @@ func (e *groupE2ee) decryptor(e2eeID string, audio bool, log zerolog.Logger) (ca
 	xf := func(frame []byte) ([]byte, error) {
 		out, err := fd.Decrypt(e.ctx, frame)
 		fl.result(err)
+		fl.sample(frame, out)
 		return out, err
 	}
 	return xf, func() { _ = fd.Close(context.WithoutCancel(e.ctx)) }, nil
@@ -482,6 +485,19 @@ const frameLogMax = 20
 
 func newFrameLog(log zerolog.Logger, op string) *frameLog {
 	return &frameLog{log: log, op: op, last: "none"}
+}
+
+// sample logs the start of the first few frames a transform sees, which tells Opus (a TOC byte
+// such as 0x78) from ciphertext.
+func (fl *frameLog) sample(in, out []byte) {
+	fl.lock.Lock()
+	n := fl.n
+	fl.lock.Unlock()
+	if n > 5 {
+		return
+	}
+	fl.log.Debug().Str("op", fl.op).Uint64("frame", n).Int("in_len", len(in)).Hex("in", in[:min(len(in), 12)]).
+		Int("out_len", len(out)).Hex("out", out[:min(len(out), 12)]).Msg("Frame sample")
 }
 
 func (fl *frameLog) result(err error) {

@@ -625,7 +625,10 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 	for _, c := range cands {
 		go g.request(cc.NewIceCandidates(c))
 	}
-	go g.request(cc.NewDominantSpeakerSubscription())
+	go func() {
+		g.request(cc.NewDominantSpeakerSubscription())
+		g.request(cc.NewCoplayReady())
+	}()
 }
 
 func (g *groupCall) request(msg *rtcsignal.Message) {
@@ -729,12 +732,20 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 		crypt.serverState(smu.StateStore, "media_update")
 	}
 	resp := &rtcsignal.ServerMediaUpdateResponse{CurrentVersion: smu.ToVersion}
+	if leg != nil {
+		// Like the web client, report our own track with the response.
+		resp.MediaStatus = map[string]rtcsignal.TrackInfo{leg.TrackID: {
+			Enabled: true, Owner: strconv.FormatInt(g.m.selfFBID(), 10), Label: rtcsignal.TrackLabelAudio,
+		}}
+	}
 	if leg == nil {
 		return g.respond(msg, rtcsignal.Body{ServerMediaUpdateResponse: resp})
 	}
 	var answer string
 	var err error
 	switch {
+	case smu.Update != nil && len(smu.Update.Media) == 0:
+		// Only media status (e.g. a camera turned on): nothing to renegotiate.
 	case smu.Update != nil:
 		answer, err = leg.AnswerDelta(smu.Update)
 	case smu.Offer != nil || smu.RenegotiationOffer != nil:
