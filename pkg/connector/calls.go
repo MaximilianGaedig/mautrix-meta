@@ -328,11 +328,12 @@ func parseFBCallNotification(node *waBinary.Node) (*callEvent, waTypes.JID, erro
 	switch et := callAttrString(attrs, "event_type"); et {
 	case "started":
 		evt.Kind = callStarted
-	case "ended":
+	case "ended", "missed":
 		evt.Kind = callEnded
 	default:
 		return nil, waTypes.EmptyJID, fmt.Errorf("unknown call event_type %q", et)
 	}
+	missed := callAttrString(attrs, "event_type") == "missed"
 	switch callAttrString(attrs, "call_type") {
 	case "video":
 		evt.Video, evt.VideoKnown = true, true
@@ -346,6 +347,10 @@ func parseFBCallNotification(node *waBinary.Node) (*callEvent, waTypes.JID, erro
 		if secs, err := strconv.ParseInt(dur, 10, 64); err == nil && secs >= 0 {
 			evt.Duration, evt.HasDuration = time.Duration(secs)*time.Second, true
 		}
+	}
+	if missed {
+		// Nobody answered: an ended call of zero length (missed / not answered notice).
+		evt.Duration, evt.HasDuration = 0, true
 	}
 	evt.Time = parseCallEventTime(callAttrString(attrs, "event_time"))
 	if evt.Time.IsZero() {

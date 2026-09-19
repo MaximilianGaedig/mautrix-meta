@@ -100,6 +100,11 @@ func TestParseFBCallNotification(t *testing.T) {
 	if evt = parseTestNode(t, n); evt.Kind != callStarted || !evt.Video || evt.Actor != testPeer {
 		t.Fatalf("unexpected event: %+v", evt)
 	}
+	// "missed" is an ended call nobody answered, whatever duration it carries.
+	if evt = parseTestNode(t, fbCallNode("missed", "voice", testPeer, "", testCallID, testT0)); evt.Kind != callEnded ||
+		!evt.HasDuration || evt.Duration != 0 {
+		t.Fatalf("unexpected missed event: %+v", evt)
+	}
 	if _, _, err := parseFBCallNotification(&waBinary.Node{Tag: "notification", Attrs: waBinary.Attrs{"type": "fb:call"}}); err == nil {
 		t.Fatal("expected error for notification without call_event")
 	}
