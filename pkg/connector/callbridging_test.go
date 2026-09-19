@@ -94,3 +94,19 @@ func TestDismissHangupReason(t *testing.T) {
 		}
 	}
 }
+
+// After an SFU JOIN is abandoned, late messages of that conference (like the
+// SMU moving it to the SFU) no longer belong to the call, so they can't end
+// the second attempt.
+func TestAbandonedAttemptStopsMatching(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &callSession{cb: &callBridge{log: zerolog.Nop()}, ctx: ctx, conference: "ROOM:1", serverInfoData: "sid1", joined: true, log: zerolog.Nop()}
+	if !s.matches(other2("ROOM:1")) {
+		t.Fatal("precondition: the attempt's conference matches")
+	}
+	s.abandonMessengerAttempt()
+	if s.matches(other2("ROOM:1")) || s.joined || s.metaLeg != nil {
+		t.Fatal("abandoned attempt still matches or looks joined")
+	}
+}

@@ -1019,7 +1019,7 @@ func (s *callSession) join(cc *rtcsignal.CallContext, params *rtcsignal.JoinPara
 		Bool("relay_info", jr.RelayInfo != nil).
 		Msg("Joined Messenger call")
 	if jr.MediaPath == rtcsignal.MediaPathSFU {
-		return fmt.Errorf("server chose the SFU media path")
+		return errSFUPath
 	}
 	s.lock.Lock()
 	s.joined = true
@@ -1074,6 +1074,10 @@ func (s *callSession) buildMessengerAnswer() (string, error) {
 }
 
 var errNoCallIdentity = errors.New("no E2EE device identity to sign x-dtls-auth")
+
+// errSFUPath: the server put the call on its SFU (group call path), which
+// the bridge can't join.
+var errSFUPath = errors.New("server chose the SFU media path")
 
 // answerMessenger runs when the Matrix user answered: JOIN the Messenger
 // call with an answer to the ring's offer.
@@ -1188,32 +1192,15 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 	s.mxLocalSDP = sdp
 	s.lock.Unlock()
 
-	metaLeg, err := s.newMetaLeg()
-	if err != nil {
-		s.log.Err(err).Msg("Failed to create Messenger PeerConnection")
-		s.end(endFailed, "")
-		return
-	}
-	offer, err := metaLeg.CreateOffer()
-	if err == nil {
-		offer, err = callbridge.PrepareMetaLocalSDP(offer, id, s.videoCodec != "")
+	err = s.placeMessengerCall(id, peerID)
+	if errors.Is(err, errSFUPath) {
+		// Right after an earlier call in the thread, Messenger tends to put
+		// the next one on its SFU; placing it again gets the P2P path.
+		s.log.Info().Msg("Messenger chose the SFU path, placing the call again")
+		s.abandonMessengerAttempt()
+		err = s.placeMessengerCall(id, peerID)
 	}
 	if err != nil {
-		s.log.Err(err).Msg("Failed to create Messenger offer")
-		s.end(endFailed, "")
-		return
-	}
-	peer := strconv.FormatInt(peerID, 10)
-	cc := rtcsignal.NewCallContext(strconv.FormatInt(s.m.selfFBID(), 10), "", "")
-	if err = s.join(cc, &rtcsignal.JoinParams{
-		Offer:        offer,
-		PeerID:       peer,
-		UsersToCall:  []string{peer},
-		AudioTrackID: metaLeg.TrackID,
-		VideoTrackID: metaLeg.VideoTrackID,
-		E2eeState:    s.m.callE2eeState(),
-		E2eeMandated: s.e2ee,
-	}); err != nil {
 		s.log.Err(err).Msg("Failed to start Messenger call")
 		s.end(endFailed, "Failed to start the Messenger call")
 		return
@@ -1231,6 +1218,52 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 			s.end(endTimeout, "")
 		}
 	})
+}
+
+// placeMessengerCall creates the Messenger leg and JOINs with an offer that
+// rings the peer.
+func (s *callSession) placeMessengerCall(id *callbridge.Identity, peerID int64) error {
+	metaLeg, err := s.newMetaLeg()
+	if err != nil {
+		return fmt.Errorf("create Messenger PeerConnection: %w", err)
+	}
+	offer, err := metaLeg.CreateOffer()
+	if err == nil {
+		offer, err = callbridge.PrepareMetaLocalSDP(offer, id, s.videoCodec != "")
+	}
+	if err != nil {
+		return fmt.Errorf("create Messenger offer: %w", err)
+	}
+	peer := strconv.FormatInt(peerID, 10)
+	cc := rtcsignal.NewCallContext(strconv.FormatInt(s.m.selfFBID(), 10), "", "")
+	return s.join(cc, &rtcsignal.JoinParams{
+		Offer:        offer,
+		PeerID:       peer,
+		UsersToCall:  []string{peer},
+		AudioTrackID: metaLeg.TrackID,
+		VideoTrackID: metaLeg.VideoTrackID,
+		E2eeState:    s.m.callE2eeState(),
+		E2eeMandated: s.e2ee,
+	})
+}
+
+// abandonMessengerAttempt leaves the conference of a failed JOIN and drops
+// its leg, so the call can be placed again.
+func (s *callSession) abandonMessengerAttempt() {
+	s.lock.Lock()
+	cc, leg := s.cc, s.metaLeg
+	s.cc, s.metaLeg, s.joined = nil, nil, false
+	s.conference, s.serverInfoData = "", ""
+	s.metaCands, s.remoteCands = nil, nil
+	s.lock.Unlock()
+	if cc != nil {
+		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+		if _, err := s.cb.sig.Request(ctx, cc.NewHangup(rtcsignal.HangupHangupCall)); err != nil && s.ctx.Err() == nil {
+			s.log.Debug().Err(err).Msg("Failed to leave the SFU conference")
+		}
+		cancel()
+	}
+	leg.Close()
 }
 
 func (cb *callBridge) rejectBusy(ctx context.Context, portal *bridgev2.Portal, peerID int64, inv *event.CallInviteEventContent) {
