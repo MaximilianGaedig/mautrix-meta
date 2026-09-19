@@ -826,3 +826,32 @@ func TestSDPVersion(t *testing.T) {
 		t.Fatal("expected an error without an o= line")
 	}
 }
+
+// TestSSRCCname: the signed SFU offer names its cname (part of our E2EE id in encrypted group calls).
+func TestSSRCCname(t *testing.T) {
+	leg := newTestLeg(t, "web", OpusPT, true)
+	offer, err := leg.CreateOffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := PrepareMetaLocalSDP(offer, testIdentity(t), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := SSRCCname(signed); got == "" || got != leg.StreamID {
+		t.Errorf("cname %q, want the stream id %q", got, leg.StreamID)
+	}
+	if got := SSRCCname("v=0\r\na=ssrc:645305178 cname:utngOpj/Sto42obD\r\n"); got != "utngOpj/Sto42obD" {
+		t.Errorf("web client cname: %q", got)
+	}
+	for stream, want := range map[string]string{
+		"100010105602888:hZvKyjdfjh6GgP1x:eef606b6-0b0c-4d4e-8f3a-1c2d3e4f5a6b": "100010105602888:hZvKyjdfjh6GgP1x",
+		"100010105602888:hZvKyjdfjh6GgP1x":                                      "100010105602888:hZvKyjdfjh6GgP1x",
+		"eef606b6-0b0c-4d4e-8f3a-1c2d3e4f5a6b":                                  "",
+		":x:y":                                                                  "",
+	} {
+		if got := E2eeIDOfStream(stream); got != want {
+			t.Errorf("E2eeIDOfStream(%q) = %q, want %q", stream, got, want)
+		}
+	}
+}

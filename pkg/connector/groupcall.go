@@ -116,6 +116,7 @@ type groupCall struct {
 	createdTS      int64
 	ring           id.EventID
 	userPresent    bool
+	crypt          *groupE2ee // end-to-end encryption, in an encrypted call
 
 	endOnce sync.Once
 }
@@ -254,14 +255,23 @@ func (cb *callBridge) startOutgoingGroup(ctx context.Context, portal *bridgev2.P
 }
 
 // canBridgeMedia checks that the call's media can be bridged: an end-to-end encrypted group call
-// needs SFrame frame encryption, which the bridge doesn't have yet.
+// needs the bridge's Messenger encryption device and Meta's frame-encryption module, which starts
+// loading here (it's needed for the JOIN).
 func (g *groupCall) canBridgeMedia() bool {
 	if !g.e2ee {
 		return true
 	}
-	g.log.Info().Msg("End-to-end encrypted group call: not bridged until SFrame support lands")
-	g.end("This encrypted Messenger group call can't be bridged yet")
-	return false
+	if g.m.callIdentity() == nil {
+		g.log.Info().Msg("End-to-end encrypted group call, but the bridge has no Messenger encryption device")
+		g.end("The bridge has no Messenger encryption device, so it can't join this encrypted call")
+		return false
+	}
+	go func() {
+		if _, err := g.m.frameCryptRuntime(g.ctx, g.threadID); err != nil {
+			g.log.Err(err).Msg("Failed to load the frame-encryption module")
+		}
+	}()
+	return true
 }
 
 // threadMembers lists the Messenger user ids of the portal's ghosts (everyone but the user).
@@ -472,11 +482,20 @@ func (g *groupCall) relayUserAudio(rtc *callbridge.RTCLeg) {
 	}
 	for g.ctx.Err() == nil {
 		g.lock.Lock()
-		leg := g.leg
+		// Only once joined: before that an encrypted call's encryption may not be set up yet.
+		leg, crypt, joined := g.leg, g.crypt, g.joined
 		g.lock.Unlock()
-		if leg != nil {
+		if leg != nil && joined {
+			log := g.log.With().Str("from", "matrixrtc").Logger()
+			if crypt != nil {
+				var stats callbridge.FrameRelayStats
+				err = callbridge.RelayAudioTransformed(g.ctx, tr, uint8(tr.PayloadType()), leg.Local, crypt.encryptTransform(log), &stats, log)
+				g.log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).
+					Uint64("frames", stats.Frames.Load()).Uint64("failed", stats.Failed.Load()).Msg("Matrix audio relay stopped")
+				return
+			}
 			var stats callbridge.RelayStats
-			err = callbridge.Relay(g.ctx, tr, uint8(tr.PayloadType()), leg.Local, &stats, g.log.With().Str("from", "matrixrtc").Logger())
+			err = callbridge.Relay(g.ctx, tr, uint8(tr.PayloadType()), leg.Local, &stats, log)
 			g.log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Matrix audio relay stopped")
 			return
 		}
@@ -524,13 +543,25 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 	cc := rtcsignal.NewCallContext(strconv.FormatInt(g.m.selfFBID(), 10), g.conference, g.serverInfoData)
 	e2ee := g.e2ee
 	g.lock.Unlock()
+	e2eeState := g.m.callE2eeState()
+	var crypt *groupE2ee
+	if e2ee {
+		if e2eeState, err = g.startE2ee(offer); err != nil {
+			g.log.Err(err).Msg("Failed to set up end-to-end encryption for the group call")
+			g.end("The bridge couldn't set up end-to-end encryption for this Messenger group call")
+			return
+		}
+		g.lock.Lock()
+		crypt = g.crypt
+		g.lock.Unlock()
+	}
 	resp, err := g.cb.sig.RequestHook(g.ctx, cc.NewJoin(&rtcsignal.JoinParams{
 		Offer:         offer,
 		SFU:           true,
 		GroupThreadID: g.threadID,
 		UsersToCall:   usersToCall,
 		AudioTrackID:  leg.TrackID,
-		E2eeState:     g.m.callE2eeState(),
+		E2eeState:     e2eeState,
 		E2eeMandated:  e2ee,
 	}), func(resp *rtcsignal.Message) {
 		if resp.Header.ResponseStatusCode != rtcsignal.StatusOK {
@@ -545,6 +576,10 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 		}
 		g.cc = cc
 		g.lock.Unlock()
+		// In the hook, so the server state reaches the module before any later media update's.
+		if crypt != nil && resp.Body.JoinResponse != nil {
+			crypt.serverState(resp.Body.JoinResponse.StateStore, "join")
+		}
 	})
 	if err != nil {
 		g.log.Err(err).Msg("Group call JOIN failed")
@@ -645,7 +680,15 @@ func (g *groupCall) handleSignal(msg *rtcsignal.Message) *rtcsignal.Message {
 			go g.end("")
 		}
 	case b.DataMessageRequest != nil && b.DataMessageRequest.Message != nil:
-		g.log.Debug().Str("topic", b.DataMessageRequest.Message.Topic).Msg("Group call data message")
+		dm := b.DataMessageRequest.Message
+		g.lock.Lock()
+		crypt := g.crypt
+		g.lock.Unlock()
+		if dm.Topic == rtcsignal.TopicE2eeKey && crypt != nil {
+			crypt.keyMessage(dm)
+		} else {
+			g.log.Debug().Str("topic", dm.Topic).Msg("Group call data message")
+		}
 	}
 	return g.respond(msg, rtcsignal.DefaultResponseBody(msg))
 }
@@ -656,13 +699,16 @@ func (g *groupCall) handleSignal(msg *rtcsignal.Message) *rtcsignal.Message {
 func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.Message {
 	smu := msg.Body.ServerMediaUpdateRequest
 	g.lock.Lock()
-	leg := g.leg
+	leg, crypt := g.leg, g.crypt
 	for trackID, ti := range smu.MediaStatus {
 		if ti.Owner != "" {
 			g.owners[trackID] = ti.Owner
 		}
 	}
 	g.lock.Unlock()
+	if crypt != nil {
+		crypt.serverState(smu.StateStore, "media_update")
+	}
 	resp := &rtcsignal.ServerMediaUpdateResponse{CurrentVersion: smu.ToVersion}
 	if leg == nil {
 		return g.respond(msg, rtcsignal.Body{ServerMediaUpdateResponse: resp})
@@ -763,7 +809,12 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 	g.lock.Lock()
 	rtc := p.rtc
 	p.tracks[tr.ID()] = true
+	crypt := g.crypt
 	g.lock.Unlock()
+	if crypt != nil {
+		g.relayDecrypted(crypt, p, rtc, tr, log)
+		return
+	}
 	var stats callbridge.RelayStats
 	if tr.Kind() == webrtc.RTPCodecTypeVideo {
 		g.lock.Lock()
@@ -783,6 +834,51 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 		err = callbridge.Relay(g.ctx, tr, uint8(tr.PayloadType()), rtc.AudioWriter(), &stats, log)
 	}
 	log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Participant relay stopped")
+}
+
+// relayDecrypted relays an encrypted call's track: every frame is decrypted with the sender's key
+// (the sender is named by the track's msid, "<userId>:<cname>:<streamId>").
+func (g *groupCall) relayDecrypted(crypt *groupE2ee, p *groupParticipant, rtc *callbridge.RTCLeg, tr *webrtc.TrackRemote, log zerolog.Logger) {
+	e2eeID := callbridge.E2eeIDOfStream(tr.StreamID())
+	if e2eeID == "" {
+		log.Warn().Str("stream", tr.StreamID()).Msg("Can't tell who sent an encrypted track, not relaying it")
+		return
+	}
+	video := tr.Kind() == webrtc.RTPCodecTypeVideo
+	xf, closeFn, err := crypt.decryptor(e2eeID, !video, log)
+	if err != nil {
+		log.Err(err).Msg("Failed to create a frame decryptor")
+		return
+	}
+	defer closeFn()
+	var stats callbridge.FrameRelayStats
+	if video {
+		g.lock.Lock()
+		w := p.video
+		g.lock.Unlock()
+		if w == nil {
+			if w, err = rtc.AddVideoTrack(tr.Codec().MimeType); err != nil {
+				log.Err(err).Msg("Failed to publish a participant's video")
+				return
+			}
+			g.lock.Lock()
+			p.video = w
+			g.lock.Unlock()
+		}
+		g.lock.Lock()
+		leg := g.leg
+		g.lock.Unlock()
+		onLoss := func() {
+			if leg != nil {
+				leg.RequestKeyframe(tr.SSRC())
+			}
+		}
+		err = callbridge.RelayVideoTransformed(g.ctx, tr, uint8(tr.PayloadType()), tr.Codec().MimeType, w, xf, onLoss, &stats, log)
+	} else {
+		err = callbridge.RelayAudioTransformed(g.ctx, tr, uint8(tr.PayloadType()), rtc.AudioWriter(), xf, &stats, log)
+	}
+	log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Uint64("frames", stats.Frames.Load()).
+		Uint64("failed", stats.Failed.Load()).Uint64("lost_packets", stats.LostPackets.Load()).Msg("Participant relay stopped")
 }
 
 // --- ending ---
@@ -812,6 +908,12 @@ func (g *groupCall) end(notice string) {
 			leg.Close()
 		}
 		g.cancel()
+		g.lock.Lock()
+		crypt := g.crypt
+		g.lock.Unlock()
+		if crypt != nil {
+			crypt.close()
+		}
 		g.cb.lock.Lock()
 		if g.cb.group == g {
 			g.cb.group = nil

@@ -53,6 +53,11 @@ call_bridging: false
 # homeserver's LiveKit (its well-known org.matrix.msc4143.rtc_foci / rtc/transports), and the bridge
 # lets DM portal members send org.matrix.msc3401.call.member.
 call_bridging_matrixrtc: true
+# With call_bridging_matrixrtc: group calls in end-to-end encrypted Messenger chats encrypt every media
+# frame with keys negotiated inside Meta's own frame-encryption WebAssembly module, which the bridge runs
+# too. By default it finds the module's URL on Messenger's group-call page like the web client does,
+# falling back to the last URL known to work. Set a file path or URL here to use a specific copy.
+call_bridging_frame_encryption_module: null
 # Should view-once messages be disabled entirely?
 disable_view_once: false
 # Should FB marketplace chats have a separate space inside the main Facebook space?

@@ -40,6 +40,9 @@ type Config struct {
 	LogRedactedLoginResponses bool `yaml:"log_redacted_login_responses"`
 
 	ThreadBackfill ThreadBackfillConfig `yaml:"thread_backfill"`
+
+	// CallBridgingFrameEncryptionModule overrides where Messenger's frame-encryption module is loaded from.
+	CallBridgingFrameEncryptionModule string `yaml:"call_bridging_frame_encryption_module"`
 }
 
 type ThreadBackfillConfig struct {
@@ -83,6 +86,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "call_notices")
 	helper.Copy(up.Bool, "call_bridging")
 	helper.Copy(up.Bool, "call_bridging_matrixrtc")
+	helper.Copy(up.Str|up.Null, "call_bridging_frame_encryption_module")
 	helper.Copy(up.Bool, "disable_view_once")
 	helper.Copy(up.Bool, "marketplace_space")
 	helper.Copy(up.Bool, "log_redacted_login_responses")

@@ -109,6 +109,31 @@ func AudioTrackID(sdp string) string {
 	return ""
 }
 
+// SSRCCname returns the cname of the SDP's first a=ssrc line. A client's cname names it in
+// end-to-end encrypted group calls: its E2EE id is "<userId>:<cname>".
+func SSRCCname(sdp string) string {
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(line, "a=ssrc:") {
+			continue
+		}
+		if _, v, ok := strings.Cut(line, " cname:"); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// E2eeIDOfStream returns the E2EE id ("<userId>:<cname>") of a group call participant's track
+// from its msid stream id: the SFU names remote streams "<ownerUserId>:<senderCname>:<streamId>".
+func E2eeIDOfStream(streamID string) string {
+	parts := strings.SplitN(streamID, ":", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return parts[0] + ":" + parts[1]
+}
+
 // noVideoSending rewrites the direction of video m-lines so the SDP never
 // claims to send video: the bridge has no video track, but Pion answers a
 // recvonly video offer with sendonly once video codecs are registered. The

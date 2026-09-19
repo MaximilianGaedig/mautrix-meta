@@ -23,6 +23,8 @@ type MetaConnector struct {
 
 	presence *presence.Manager
 	rtcFocus rtcFocus
+	// frameCrypt is Messenger's frame-encryption module, for encrypted group calls.
+	frameCrypt frameCryptLoader
 }
 
 var (
