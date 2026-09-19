@@ -119,6 +119,13 @@ func (m *Manager) Update(remoteUserID string, st State) {
 	now := m.now()
 	m.lock.Lock()
 	defer m.lock.Unlock()
+	// Only presence goes to Matrix, never a status message: the homeserver's last_active_ago is the
+	// one "last seen", and it's stamped with every presence the bridge sets. So an offline is only
+	// sent when we saw the user go offline (the moment they were last active), never re-sent, and
+	// never sent for someone we first see offline (that would say they were active just now).
+	if st.Presence == event.PresenceUnavailable {
+		st.Presence = event.PresenceOffline
+	}
 	e, ok := m.entries[remoteUserID]
 	if !ok {
 		if len(m.entries) >= m.cfg.MaxTracked && !m.evictOne() {
@@ -126,19 +133,42 @@ func (m *Manager) Update(remoteUserID string, st State) {
 		}
 		e = &entry{}
 		m.entries[remoteUserID] = e
-		if st.Presence == event.PresenceOffline && st.StatusMsg == "" {
-			// A bare "offline" says nothing the homeserver doesn't already
-			// assume for a ghost, so don't flood it with those at startup.
-			// Anything carrying information (online, hidden last seen, an
-			// exact last-seen time) is sent on first sight.
+		if st.Presence != event.PresenceOnline {
 			e.sent = st.Presence
 			e.sentAt = now
 		}
 	}
 	e.desired = st.Presence
-	e.desiredMsg = st.StatusMsg
+	e.desiredMsg = ""
 	e.until = st.Until
 	e.touched = now
+}
+
+// ActivityOnline is how long someone counts as online after we saw them do something.
+const ActivityOnline = 5 * time.Minute
+
+// Activity records that a remote user did something at `at` (sent a message, typed, read ours): they
+// are online until ActivityOnline after it, which also covers networks that hide online status.
+func (m *Manager) Activity(remoteUserID string, at time.Time) {
+	if m == nil {
+		return
+	}
+	now := m.now()
+	if at.IsZero() || at.After(now) {
+		at = now
+	}
+	until := at.Add(ActivityOnline)
+	if !until.After(now) {
+		return // old news (backfill): nothing to say about now
+	}
+	m.lock.Lock()
+	e, ok := m.entries[remoteUserID]
+	// Don't cut short a longer online the network itself reported.
+	longer := ok && e.desired == event.PresenceOnline && (e.until.IsZero() || e.until.After(until))
+	m.lock.Unlock()
+	if !longer {
+		m.Update(remoteUserID, State{Presence: event.PresenceOnline, Until: until})
+	}
 }
 
 // evictOne drops a settled, non-online entry. Must hold the lock.
@@ -172,7 +202,7 @@ func (m *Manager) Tick(ctx context.Context) {
 	m.lock.Lock()
 	for k, e := range m.entries {
 		if e.desired == event.PresenceOnline && !e.until.IsZero() && !now.Before(e.until) {
-			e.desired = event.PresenceUnavailable
+			e.desired = event.PresenceOffline
 			e.until = time.Time{}
 		}
 		sinceSent := now.Sub(e.sentAt)

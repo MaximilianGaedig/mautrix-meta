@@ -215,6 +215,7 @@ func (m *MetaClient) handleParsedTable(ctx context.Context, isInitial bool, tbl 
 			return
 		}
 		res := m.UserLogin.QueueRemoteEvent(evt)
+		m.noteActivity(evt)
 		if !res.Success {
 			zerolog.Ctx(ctx).Warn().
 				Any("queue_result", res).

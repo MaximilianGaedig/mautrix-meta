@@ -104,8 +104,8 @@ func TestExpiryDecaysOnline(t *testing.T) {
 		t.Fatalf("unexpected send before expiry: %v", s)
 	}
 	h.advance(time.Second)
-	if s := h.take(); len(s) != 1 || s[0].p != event.PresenceUnavailable {
-		t.Fatalf("expected unavailable after expiry, got %v", s)
+	if s := h.take(); len(s) != 1 || s[0].p != event.PresenceOffline {
+		t.Fatalf("expected offline after expiry, got %v", s)
 	}
 	// And no online refresh afterwards.
 	h.advance(10 * time.Minute)
@@ -171,10 +171,8 @@ func TestMaxTrackedEvictsSettled(t *testing.T) {
 func TestTokenBucket(t *testing.T) {
 	now := time.Unix(0, 0)
 	tb := NewTokenBucket(1, 2, now)
-	for i, want := range []bool{true, true, false} {
-		if tb.Allow(now) != want {
-			t.Fatalf("burst of 2 expected (call %d)", i)
-		}
+	if !tb.Allow(now) || !tb.Allow(now) || tb.Allow(now) {
+		t.Fatal("burst of 2 expected")
 	}
 	if tb.Allow(now.Add(500 * time.Millisecond)) {
 		t.Fatal("half a token should not be enough")
@@ -182,40 +180,51 @@ func TestTokenBucket(t *testing.T) {
 	if !tb.Allow(now.Add(time.Second)) {
 		t.Fatal("one token after a second")
 	}
-	for i, want := range []bool{true, true, false} {
-		if tb.Allow(now.Add(time.Hour)) != want {
-			t.Fatalf("refill must cap at burst (call %d)", i)
-		}
+	if !tb.Allow(now.Add(time.Hour)) || !tb.Allow(now.Add(time.Hour)) || tb.Allow(now.Add(time.Hour)) {
+		t.Fatal("refill must cap at burst")
 	}
 }
 
-func TestFirstSightWithInfoIsSent(t *testing.T) {
+func TestOnlyPresenceIsSent(t *testing.T) {
 	h := newHarness(Config{})
+	// First sight of anyone not online isn't sent (it would stamp them active now), status messages
+	// never are.
 	h.m.Update("hidden", State{Presence: event.PresenceUnavailable, StatusMsg: "last seen recently"})
 	h.m.Update("exact", State{Presence: event.PresenceOffline, StatusMsg: "last seen 2026-09-18T19:40:00Z"})
-	h.m.Update("bare", State{Presence: event.PresenceOffline})
+	h.m.Update("online", State{Presence: event.PresenceOnline, StatusMsg: "anything"})
 	h.advance(time.Minute)
-	got := map[string]sentReq{}
-	for _, r := range h.take() {
-		got[r.key] = r
+	s := h.take()
+	if len(s) != 1 || s[0].key != "online" || s[0].p != event.PresenceOnline || s[0].msg != "" {
+		t.Fatalf("unexpected sends: %+v", s)
 	}
-	if len(got) != 2 || got["hidden"].msg != "last seen recently" || got["exact"].p != event.PresenceOffline {
-		t.Fatalf("unexpected sends: %+v", got)
+	// Going offline is sent once, as offline, without text.
+	h.m.Update("online", State{Presence: event.PresenceUnavailable, StatusMsg: "last seen now"})
+	h.advance(time.Minute)
+	if s = h.take(); len(s) != 1 || s[0].p != event.PresenceOffline || s[0].msg != "" {
+		t.Fatalf("expected one offline, got %+v", s)
+	}
+	h.m.Update("online", State{Presence: event.PresenceOffline})
+	h.advance(time.Minute)
+	if s = h.take(); len(s) != 0 {
+		t.Fatalf("offline re-sent: %+v", s)
 	}
 }
 
-func TestStatusMsgChangeIsSent(t *testing.T) {
-	h := newHarness(Config{})
-	h.m.Update("u", State{Presence: event.PresenceOffline, StatusMsg: "last seen 2026-09-18T19:00:00Z"})
-	h.advance(time.Minute)
-	h.take()
-	h.m.Update("u", State{Presence: event.PresenceOffline, StatusMsg: "last seen 2026-09-18T19:40:00Z"})
-	h.advance(time.Minute)
-	if s := h.take(); len(s) != 1 || s[0].msg != "last seen 2026-09-18T19:40:00Z" {
-		t.Fatalf("expected the new last-seen to be sent once, got %+v", s)
+func TestActivityMakesOnlineForAWhile(t *testing.T) {
+	h := newHarness(Config{Debounce: time.Second})
+	h.m.Activity("u", h.now)
+	h.advance(0)
+	if s := h.take(); len(s) != 1 || s[0].p != event.PresenceOnline {
+		t.Fatalf("expected online, got %+v", s)
 	}
+	h.advance(ActivityOnline)
+	if s := h.take(); len(s) != 1 || s[0].p != event.PresenceOffline {
+		t.Fatalf("expected offline after the activity window, got %+v", s)
+	}
+	// Old activity (backfill) says nothing about now.
+	h.m.Activity("old", h.now.Add(-time.Hour))
 	h.advance(time.Minute)
 	if s := h.take(); len(s) != 0 {
-		t.Fatalf("expected no resend of an unchanged status, got %+v", s)
+		t.Fatalf("old activity sent: %+v", s)
 	}
 }

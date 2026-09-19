@@ -35,7 +35,9 @@ func (m *MetaClient) e2eeEventHandler(rawEvt any) bool {
 		if !m.Main.Bridge.QueueRemoteEvent(m.UserLogin, &EnsureWAChatStateEvent{JID: evt.Info.Chat, m: m}).Success {
 			return false
 		}
-		return m.Main.Bridge.QueueRemoteEvent(m.UserLogin, &WAMessageEvent{FBMessage: evt, m: m}).Success
+		msgEvt := &WAMessageEvent{FBMessage: evt, m: m}
+		m.noteActivity(msgEvt)
+		return m.Main.Bridge.QueueRemoteEvent(m.UserLogin, msgEvt).Success
 	case *events.ChatPresence:
 		m.handleWAChatPresence(m.Main.Bridge.BackgroundCtx, evt)
 	case *events.Receipt:
@@ -62,7 +64,7 @@ func (m *MetaClient) e2eeEventHandler(rawEvt any) bool {
 		for i, id := range evt.MessageIDs {
 			targets[i] = metaid.MakeWAMessageID(evt.Chat, messageSender, id)
 		}
-		return m.Main.Bridge.QueueRemoteEvent(m.UserLogin, &simplevent.Receipt{
+		receipt := &simplevent.Receipt{
 			EventMeta: simplevent.EventMeta{
 				Type:       evtType,
 				LogContext: nil,
@@ -71,7 +73,9 @@ func (m *MetaClient) e2eeEventHandler(rawEvt any) bool {
 				Timestamp:  evt.Timestamp,
 			},
 			Targets: targets,
-		}).Success
+		}
+		m.noteActivity(receipt)
+		return m.Main.Bridge.QueueRemoteEvent(m.UserLogin, receipt).Success
 	case *events.OfflineSyncPreview:
 		m.connectBackgroundWAEventCount.Store(uint32(evt.Messages))
 	case *events.OfflineSyncCompleted:
@@ -202,7 +206,7 @@ func (m *MetaClient) handleWAChatPresence(ctx context.Context, evt *events.ChatP
 		timeout = 0
 	}
 
-	m.UserLogin.QueueRemoteEvent(&simplevent.Typing{
+	typing := &simplevent.Typing{
 		EventMeta: simplevent.EventMeta{
 			Type:       bridgev2.RemoteEventTyping,
 			LogContext: nil,
@@ -212,5 +216,7 @@ func (m *MetaClient) handleWAChatPresence(ctx context.Context, evt *events.ChatP
 		},
 		Timeout: timeout,
 		Type:    typingType,
-	})
+	}
+	m.noteActivity(typing)
+	m.UserLogin.QueueRemoteEvent(typing)
 }

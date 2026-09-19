@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix"
@@ -304,4 +305,26 @@ func (m *MetaClient) handleTablePresence(ctx context.Context, tbl *table.LSTable
 	if ids, changed := m.presenceContacts.add(tbl, self); changed && m.Client != nil {
 		m.Client.SetPresenceContacts(ids)
 	}
+}
+
+// noteActivity marks the sender of a message, read receipt or typing notification online for a while
+// (presence.Manager.Activity): what someone does is the most accurate presence we have.
+func (m *MetaClient) noteActivity(evt bridgev2.RemoteEvent) {
+	if m.Main.presence == nil || evt == nil {
+		return
+	}
+	switch evt.GetType() {
+	case bridgev2.RemoteEventMessage, bridgev2.RemoteEventReadReceipt, bridgev2.RemoteEventTyping:
+	default:
+		return
+	}
+	sender := evt.GetSender()
+	if sender.IsFromMe || sender.Sender == "" || sender.Sender == metaid.MakeUserID(m.selfFBID()) {
+		return
+	}
+	at := time.Now()
+	if ts, ok := evt.(bridgev2.RemoteEventWithTimestamp); ok && !ts.GetTimestamp().IsZero() {
+		at = ts.GetTimestamp()
+	}
+	m.Main.presence.Activity(string(sender.Sender), at)
 }
