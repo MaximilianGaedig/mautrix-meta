@@ -108,6 +108,10 @@ type Leg struct {
 	// has no rollback, so an offer the peer rejects or talks over would
 	// otherwise leave the connection stuck in have-local-offer.
 	unappliedOffer string
+	// localCandidates are our gathered ICE candidates ("candidate:…"), put
+	// into renegotiation offers (CreateOffer's SDP has none).
+	localCandidates []string
+	gatheringDone   bool
 }
 
 // NewLeg creates a PeerConnection with Opus audio (and, for WebShape, the
@@ -201,6 +205,9 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 	var gatherOnce sync.Once
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
+			l.lock.Lock()
+			l.gatheringDone = true
+			l.lock.Unlock()
 			gatherOnce.Do(func() { close(l.gathered) })
 			l.log.Debug().Msg("ICE gathering complete")
 			return
@@ -209,6 +216,7 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 		l.log.Debug().Stringer("cand_type", c.Typ).Stringer("protocol", c.Protocol).Msg("Local ICE candidate")
 		init := c.ToJSON()
 		l.lock.Lock()
+		l.localCandidates = append(l.localCandidates, init.Candidate)
 		cb := l.onCandidate
 		l.lock.Unlock()
 		if cb != nil {
@@ -361,8 +369,19 @@ func (l *Leg) Renegotiate() (string, error) {
 	}
 	l.lock.Lock()
 	l.unappliedOffer = offer.SDP
+	lines := make([]string, 0, len(l.localCandidates)+1)
+	for _, c := range l.localCandidates {
+		lines = append(lines, "a="+c)
+	}
+	if l.gatheringDone && len(lines) > 0 {
+		lines = append(lines, "a=end-of-candidates")
+	}
 	l.lock.Unlock()
-	return WithCandidatesFrom(offer.SDP, cur.SDP), nil
+	if len(lines) == 0 {
+		// Nothing recorded (candidates came in before the callback was set): take the description's.
+		return WithCandidatesFrom(offer.SDP, cur.SDP), nil
+	}
+	return withCandidateLines(offer.SDP, lines), nil
 }
 
 // RollbackOffer drops a local offer the peer never answered (rejected or

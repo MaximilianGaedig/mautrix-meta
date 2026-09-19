@@ -477,6 +477,12 @@ func WithCandidatesFrom(offer, from string) string {
 	if len(cands) == 0 {
 		return offer
 	}
+	return withCandidateLines(offer, cands)
+}
+
+// withCandidateLines adds the candidate lines (a=candidate:…, a=end-of-candidates)
+// to every media section of `offer` that has none.
+func withCandidateLines(offer string, cands []string) string {
 	sections := strings.Split(offer, "\r\nm=")
 	for i := 1; i < len(sections); i++ {
 		if strings.Contains(sections[i], "\r\na=candidate:") {
