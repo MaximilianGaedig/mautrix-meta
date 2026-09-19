@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -121,7 +122,9 @@ type groupCall struct {
 	userPresent    bool
 	crypt          *groupE2ee // end-to-end encryption, in an encrypted call
 
-	endOnce sync.Once
+	mediaConnected atomic.Bool
+	mediaConnSent  atomic.Bool
+	endOnce        sync.Once
 }
 
 func (cb *callBridge) newGroupCall(ctx context.Context, portal *bridgev2.Portal, threadID string, incoming bool) (*groupCall, error) {
@@ -538,6 +541,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 	leg.OnRemoteTrack(g.onRemoteTrack)
 	leg.OnCandidate(g.onLocalCandidate)
 	leg.OnData(g.onLegData)
+	leg.OnState(g.onLegState)
 	g.lock.Lock()
 	g.leg = leg
 	pending := g.remoteCands
@@ -630,6 +634,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 	for _, c := range cands {
 		go g.request(cc.NewIceCandidates(c))
 	}
+	g.sendMediaConnected()
 	go func() {
 		g.request(cc.NewDominantSpeakerSubscription())
 		g.request(cc.NewCoplayReady())
@@ -671,6 +676,28 @@ func (g *groupCall) request(msg *rtcsignal.Message) {
 	if _, err := g.cb.sig.Request(g.ctx, msg); err != nil && g.ctx.Err() == nil {
 		g.log.Debug().Err(err).Stringer("type", msg.Header.Type).Msg("Group call request failed")
 	}
+}
+
+// onLegState tells the SFU our media is connected, as the web client does once its PeerConnection
+// is up (CLIENT_EVENT MEDIA_CONNECTED).
+func (g *groupCall) onLegState(state webrtc.PeerConnectionState) {
+	if state != webrtc.PeerConnectionStateConnected || !g.mediaConnected.CompareAndSwap(false, true) {
+		return
+	}
+	g.log.Info().Msg("Messenger media connected")
+	g.sendMediaConnected()
+}
+
+// sendMediaConnected sends the CLIENT_EVENT once both the connection is up and the JOIN gave the
+// call its context (either can come first).
+func (g *groupCall) sendMediaConnected() {
+	g.lock.Lock()
+	cc := g.cc
+	g.lock.Unlock()
+	if cc == nil || !g.mediaConnected.Load() || !g.mediaConnSent.CompareAndSwap(false, true) {
+		return
+	}
+	go g.request(cc.NewMediaConnected())
 }
 
 func (g *groupCall) onLocalCandidate(c *webrtc.ICECandidateInit) {
