@@ -30,6 +30,9 @@ func makeFacebookEndpoints(host string) map[string]string {
 
 		"dgw_lightspeed":       dgwBase + "/ws/lightspeed",
 		"dgw_streamcontroller": dgwBase + "/ws/streamcontroller",
+		"dgw_rpsignaling":      dgwBase + "/ws/rpsignaling",
+		"edge_chat_mqtt":       "wss://edge-chat." + host + "/chat",
+		"turndiscovery":        baseURL + "/videocall/turndiscovery/",
 
 		"e2ee_ws_url":   "wss://web-chat-e2ee.facebook.com/ws/chat",
 		"icdc_fetch":    "https://reg-e2ee.facebook.com/v2/fb_icdc_fetch",

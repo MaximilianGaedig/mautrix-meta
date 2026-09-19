@@ -50,6 +50,9 @@ type SocketOptions struct {
 	AppID          string
 	UserID         string
 	DeviceID       string
+	// ExtraQuery is appended to the connection URL (e.g. rpsignaling's
+	// x-dgw-app-useUnifiedStream=true).
+	ExtraQuery url.Values
 }
 
 type Socket struct {
@@ -504,6 +507,11 @@ func (s *Socket) getConnURL() string {
 	query.Add("x-dgw-deviceid", s.DeviceID)
 	if s.AppStreamGroup != "" {
 		query.Add("x-dgw-app-stream-group", s.AppStreamGroup)
+	}
+	for k, vs := range s.ExtraQuery {
+		for _, v := range vs {
+			query.Add(k, v)
+		}
 	}
 
 	encodedQuery := query.Encode()
