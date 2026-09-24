@@ -37,9 +37,10 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/libsignal/ecc"
 	waTypes "go.mau.fi/whatsmeow/types"
+	"maunium.net/go/mautrix/bridgev2/callbridge"
 
-	"go.mau.fi/mautrix-meta/pkg/connector/callbridge"
 	"go.mau.fi/mautrix-meta/pkg/connector/framecrypt"
+	"go.mau.fi/mautrix-meta/pkg/connector/metacall"
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 )
 
@@ -145,7 +146,7 @@ type groupE2eeConfig struct {
 	// negotiates encryption on (as the web client does) and pass media through otherwise.
 	Mandated bool
 	SelfID   string
-	Identity *callbridge.Identity
+	Identity *metacall.Identity
 	// LocalCname is the cname of our SDP; our E2EE id is "<SelfID>:<LocalCname>".
 	LocalCname string
 	// Send delivers an E2eeKey message to a user. It is called from one goroutine, in order.

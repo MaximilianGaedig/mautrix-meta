@@ -35,10 +35,11 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/libsignal/ecc"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/callbridge"
 
-	"go.mau.fi/mautrix-meta/pkg/connector/callbridge"
 	"go.mau.fi/mautrix-meta/pkg/connector/framecrypt"
 	"go.mau.fi/mautrix-meta/pkg/connector/framecrypt/fcsim"
+	"go.mau.fi/mautrix-meta/pkg/connector/metacall"
 	"go.mau.fi/mautrix-meta/pkg/messagix"
 	"go.mau.fi/mautrix-meta/pkg/messagix/cookies"
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
@@ -117,7 +118,7 @@ func (s *e2eeSFU) join(uid, cname string, devID int32, trust func(string, int32,
 	e, raw, err := newGroupE2ee(context.Background(), e2eeTestRuntime(t), groupE2eeConfig{
 		Mandated:      !s.open,
 		SelfID:        uid,
-		Identity:      &callbridge.Identity{DeviceID: devID, Priv: kp.PrivateKey().Serialize(), Pub: kp.PublicKey().PublicKey()},
+		Identity:      &metacall.Identity{DeviceID: devID, Priv: kp.PrivateKey().Serialize(), Pub: kp.PublicKey().PublicKey()},
 		LocalCname:    cname,
 		Send:          send,
 		TrustIdentity: trustFn,

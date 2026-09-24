@@ -49,12 +49,13 @@ import (
 	"go.mau.fi/libsignal/ecc"
 	waTypes "go.mau.fi/whatsmeow/types"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/callbridge"
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
-	"go.mau.fi/mautrix-meta/pkg/connector/callbridge"
+	"go.mau.fi/mautrix-meta/pkg/connector/metacall"
 	"go.mau.fi/mautrix-meta/pkg/messagix"
 	"go.mau.fi/mautrix-meta/pkg/messagix/callsignal"
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
@@ -566,7 +567,7 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		s.lock.Unlock()
 		if already {
 			// The answer to our own mid-call offer (e.g. our camera turning on), not a pickup.
-			if err := leg.SetRenegotiationAnswer(callbridge.PrepareMetaRemoteSDP(sd.SDP)); err != nil {
+			if err := leg.SetRenegotiationAnswer(metacall.PrepareRemoteSDP(sd.SDP)); err != nil {
 				callbridge.LogSDPShape(s.log.Err(err), sd.SDP).Msg("Failed to apply Messenger renegotiation answer")
 			} else {
 				s.log.Info().Msg("Messenger accepted our renegotiation")
@@ -575,7 +576,7 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		}
 		callbridge.LogSDPShape(s.log.Debug(), sd.SDP).Msg("Messenger answer")
 		s.log.Info().Msg("Messenger peer answered")
-		if err := leg.SetAnswer(callbridge.PrepareMetaRemoteSDP(sd.SDP)); err != nil {
+		if err := leg.SetAnswer(metacall.PrepareRemoteSDP(sd.SDP)); err != nil {
 			s.log.Err(err).Msg("Failed to apply Messenger answer")
 			go s.end(endFailed, "Failed to apply the Messenger answer")
 			break
@@ -588,9 +589,9 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		// A renegotiation: answer it in the SMU response. Messenger's mobile apps renegotiate in
 		// Plan B even on a call we set up in Unified Plan (see Leg.AnswerRenegotiation).
 		offersVideo := callbridge.SendsVideo(sd.SDP)
-		answer, err := leg.AnswerRenegotiation(callbridge.PrepareMetaRemoteSDP(sd.SDP))
+		answer, err := leg.AnswerRenegotiation(metacall.PrepareRemoteSDP(sd.SDP))
 		if err == nil {
-			answer, err = callbridge.PrepareMetaLocalSDP(answer, s.m.callIdentity(), s.videoCodec != "" || offersVideo)
+			answer, err = metacall.PrepareLocalSDP(answer, s.m.callIdentity(), s.videoCodec != "" || offersVideo)
 		}
 		if err != nil {
 			callbridge.LogSDPShape(s.log.Err(err), sd.SDP).Bool("leg_plan_b", leg.IsPlanB()).
@@ -657,12 +658,12 @@ func (s *callSession) sendMetaCandidates(cc *rtcsignal.CallContext, cands []rtcs
 // --- identity ---
 
 // callIdentity is the bridge device's Signal identity for x-dtls-auth.
-func (m *MetaClient) callIdentity() *callbridge.Identity {
+func (m *MetaClient) callIdentity() *metacall.Identity {
 	dev := m.WADevice
 	if dev == nil || dev.IdentityKey == nil || dev.ID == nil {
 		return nil
 	}
-	return &callbridge.Identity{
+	return &metacall.Identity{
 		UserID:   m.selfFBID(),
 		DeviceID: int32(dev.ID.Device),
 		Priv:     *dev.IdentityKey.Priv,
@@ -1330,9 +1331,9 @@ func (s *callSession) buildMessengerAnswer() (string, error) {
 	s.lock.Lock()
 	offer := s.ringOffer
 	s.lock.Unlock()
-	answer, err := leg.AnswerOffer(callbridge.PrepareMetaRemoteSDP(offer))
+	answer, err := leg.AnswerOffer(metacall.PrepareRemoteSDP(offer))
 	if err == nil {
-		answer, err = callbridge.PrepareMetaLocalSDP(answer, id, s.videoCodec != "")
+		answer, err = metacall.PrepareLocalSDP(answer, id, s.videoCodec != "")
 	}
 	if err != nil {
 		return "", fmt.Errorf("create Messenger answer: %w", err)
@@ -1497,14 +1498,14 @@ func (cb *callBridge) startOutgoing(ctx context.Context, portal *bridgev2.Portal
 
 // placeMessengerCall creates the Messenger leg and JOINs with an offer that
 // rings the peer.
-func (s *callSession) placeMessengerCall(id *callbridge.Identity, peerID int64) error {
+func (s *callSession) placeMessengerCall(id *metacall.Identity, peerID int64) error {
 	metaLeg, err := s.newMetaLeg()
 	if err != nil {
 		return fmt.Errorf("create Messenger PeerConnection: %w", err)
 	}
 	offer, err := metaLeg.CreateOffer()
 	if err == nil {
-		offer, err = callbridge.PrepareMetaLocalSDP(offer, id, s.videoCodec != "")
+		offer, err = metacall.PrepareLocalSDP(offer, id, s.videoCodec != "")
 	}
 	if err != nil {
 		return fmt.Errorf("create Messenger offer: %w", err)

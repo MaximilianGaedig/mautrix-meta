@@ -43,12 +43,13 @@ import (
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/callbridge"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
-	"go.mau.fi/mautrix-meta/pkg/connector/callbridge"
+	"go.mau.fi/mautrix-meta/pkg/connector/metacall"
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 )
@@ -667,7 +668,7 @@ func (s *callSession) sendMetaVideo(mime string) error {
 	}
 	offer, err := leg.Renegotiate()
 	if err == nil {
-		offer, err = callbridge.PrepareMetaLocalSDP(offer, s.m.callIdentity(), true)
+		offer, err = metacall.PrepareLocalSDP(offer, s.m.callIdentity(), true)
 	}
 	if err != nil {
 		return fmt.Errorf("create video offer: %w", err)
@@ -703,7 +704,7 @@ func (s *callSession) sendMetaVideo(mime string) error {
 	if err = s.verifyPeerSDP(cmu.Answer.SDP, origin); err != nil {
 		return fmt.Errorf("verify answer: %w", err)
 	}
-	if err = leg.SetRenegotiationAnswer(callbridge.PrepareMetaRemoteSDP(cmu.Answer.SDP)); err != nil {
+	if err = leg.SetRenegotiationAnswer(metacall.PrepareRemoteSDP(cmu.Answer.SDP)); err != nil {
 		callbridge.LogSDPShape(s.log.Err(err), cmu.Answer.SDP).Msg("Failed to apply Messenger's answer to our video")
 		return err
 	}

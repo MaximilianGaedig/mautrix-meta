@@ -39,13 +39,14 @@ import (
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/callbridge"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
-	"go.mau.fi/mautrix-meta/pkg/connector/callbridge"
+	"go.mau.fi/mautrix-meta/pkg/connector/metacall"
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 )
@@ -552,7 +553,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 	}
 	offer, err := leg.CreateOffer()
 	if err == nil {
-		offer, err = callbridge.PrepareMetaLocalSDP(offer, id, false)
+		offer, err = metacall.PrepareLocalSDP(offer, id, false)
 	}
 	if err != nil {
 		g.log.Err(err).Msg("Failed to create the SFU offer")
@@ -621,7 +622,7 @@ func (g *groupCall) joinMessenger(usersToCall []string) {
 		Int("groups_of_users", len(jr.GroupsOfUsers)).Msg("Joined Messenger group call")
 	callbridge.LogSDPShape(g.log.Info(), jr.Answer.SDP).Msg("SFU answer")
 	g.log.Debug().Str("offer", callbridge.RedactSDP(offer)).Str("answer", callbridge.RedactSDP(jr.Answer.SDP)).Msg("SFU JOIN SDPs")
-	if err = leg.SetAnswer(callbridge.PrepareMetaRemoteSDP(jr.Answer.SDP)); err != nil {
+	if err = leg.SetAnswer(metacall.PrepareRemoteSDP(jr.Answer.SDP)); err != nil {
 		g.log.Err(err).Msg("Failed to apply the SFU's answer")
 		g.end("")
 		return
@@ -810,12 +811,12 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 	case smu.Update != nil && len(smu.Update.Media) == 0:
 		// Only media status (e.g. a camera turned on): nothing to renegotiate.
 	case smu.Update != nil:
-		answer, err = leg.AnswerDelta(smu.Update)
+		answer, err = metacall.AnswerDelta(leg, smu.Update)
 	case smu.Offer != nil || smu.RenegotiationOffer != nil:
 		_, sd := smu.RemoteSDP()
-		answer, err = leg.AnswerRenegotiation(callbridge.PrepareMetaRemoteSDP(sd.SDP))
+		answer, err = leg.AnswerRenegotiation(metacall.PrepareRemoteSDP(sd.SDP))
 	case smu.Answer != nil:
-		err = leg.SetRenegotiationAnswer(callbridge.PrepareMetaRemoteSDP(smu.Answer.SDP))
+		err = leg.SetRenegotiationAnswer(metacall.PrepareRemoteSDP(smu.Answer.SDP))
 	}
 	if g.log.GetLevel() <= zerolog.DebugLevel {
 		ev := g.log.Debug().Bool("offer", smu.Offer != nil).Bool("renegotiation_offer", smu.RenegotiationOffer != nil).
@@ -839,7 +840,7 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 	}
 	if answer != "" {
 		if id := g.m.callIdentity(); id != nil {
-			if signed, err := callbridge.PrepareMetaLocalSDP(answer, id, false); err == nil {
+			if signed, err := metacall.PrepareLocalSDP(answer, id, false); err == nil {
 				answer = signed
 			}
 		}
