@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -230,9 +231,23 @@ func (m *MetaClient) SearchUsers(ctx context.Context, search string) ([]*bridgev
 				UserID:   userID,
 				Ghost:    ghost,
 				UserInfo: m.wrapUserInfo(result),
+				Context:  searchContext(result),
 			})
 		}
 	}
 
 	return users, nil
+}
+
+// searchContext is the line Messenger itself puts under a search result to tell people with the same
+// name apart: mutual friends, where they live, a username. Three people called Max Müller are three
+// identical rows without it, and the reader has no way to pick the right one.
+func searchContext(result *table.LSInsertSearchResult) string {
+	lines := make([]string, 0, 2)
+	for _, line := range []string{result.ContextLine, result.SecondaryContextLine} {
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, " · ")
 }
