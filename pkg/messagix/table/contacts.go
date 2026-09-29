@@ -208,3 +208,13 @@ type LSUpsertCommunityMemberRanges struct {
 
 	Unrecognized map[int]any `json:",omitempty"`
 }
+
+// GetContactViewerRelationship lets anything outside this package ask how the viewer knows this
+// person without caring which of the two contact rows it is holding.
+func (c *LSDeleteThenInsertContact) GetContactViewerRelationship() ContactViewerRelationship {
+	return c.ContactViewerRelationship
+}
+
+func (vcre *LSVerifyContactRowExists) GetContactViewerRelationship() ContactViewerRelationship {
+	return vcre.ContactViewerRelationship
+}

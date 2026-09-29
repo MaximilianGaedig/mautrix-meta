@@ -348,3 +348,25 @@ const (
 	EphemeralMediaStateReplayed
 	EphemeralMediaStateExpired
 )
+
+// Name is the relationship as a word rather than a number, for anything outside messagix that has to
+// say how you know somebody. Deliberately not the enum's own spelling: NOT_CONTACT and SOFT_CONTACT
+// say what Messenger's data model calls them, not what a person would call them.
+//
+// SOFT_CONTACT is somebody the network has decided you know - a suggested contact, a person you have
+// exchanged messages with without adding - which is a weaker claim than being a contact, so it is
+// reported as its own thing rather than folded into either side.
+func (r ContactViewerRelationship) Name() string {
+	switch r {
+	case NOT_CONTACT:
+		return "none"
+	case CONTACT_OF_VIEWER:
+		return "contact"
+	case FACEBOOK_FRIEND:
+		return "friend"
+	case SOFT_CONTACT:
+		return "suggested"
+	default:
+		return ""
+	}
+}
