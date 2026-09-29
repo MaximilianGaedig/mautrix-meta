@@ -42,6 +42,7 @@ import (
 )
 
 const instagramWebTwoFactorValidateCodeDocID = "26264014419868193"
+const instagramWebTwoFactorSendCodeDocID = "27297512486584094"
 
 var ErrInstagramWebCredentialsRejected = errors.New("instagram web credentials were rejected")
 var ErrInstagramWebLoginRejected = errors.New("instagram web sign-in was rejected")
@@ -93,6 +94,16 @@ type instagramWebLoginResponse struct {
 	CheckpointURL     string                    `json:"checkpoint_url"`
 	RedirectURL       string                    `json:"redirect_url"`
 	TwoFactorInfo     instagramWebTwoFactorInfo `json:"two_factor_info"`
+	Errors            struct {
+		Error []string `json:"error"`
+	} `json:"errors"`
+}
+
+func (r instagramWebLoginResponse) errorMessage() string {
+	if r.Message != "" {
+		return r.Message
+	}
+	return strings.Join(r.Errors.Error, " ")
 }
 
 func instagramWebSprinkleToken(csrfToken string, config types.SprinkleConfig) (string, error) {
@@ -363,6 +374,7 @@ func (c *Client) logInstagramWebRequestRejection(
 }
 
 func (c *Client) captureInstagramWebTwoFactor(
+	ctx context.Context,
 	result instagramWebLoginResponse,
 	fallbackUsername string,
 	preResponseCSRFToken string,
@@ -417,6 +429,11 @@ func (c *Client) captureInstagramWebTwoFactor(
 		Bool("csrf_rotated", responseCSRFToken != "" && responseCSRFToken != preResponseCSRFToken).
 		Bool("csrf_retained", retainedCSRFToken).
 		Msg("Captured Instagram web two-factor challenge")
+	if info.EncryptedContext != "" && (method == "SMS" || method == "WHATSAPP") {
+		if err := c.sendInstagramWebTwoFactorCode(ctx, c.webTwoFactor); err != nil {
+			return nil, err
+		}
+	}
 	return &InstagramWebTwoFactorChallenge{
 		TOTP:     info.TOTP,
 		SMS:      info.SMS,
@@ -437,6 +454,7 @@ func (c *Client) CreateInstagramWebSession(
 	} else if identifier == "" || password == "" {
 		return nil, errors.New("instagram web login is missing credentials")
 	}
+	c.http.SetInstagramNativeMode(false)
 	c.webTwoFactor = nil
 	c.webAccountManager = nil
 	c.webAuthPlatform = nil
@@ -564,11 +582,11 @@ func (c *Client) CreateInstagramWebSession(
 			if response != nil {
 				statusCode = response.StatusCode
 			}
-			return c.captureInstagramWebTwoFactor(result, identifier, preResponseCSRFToken, statusCode)
+			return c.captureInstagramWebTwoFactor(ctx, result, identifier, preResponseCSRFToken, statusCode)
 		} else if instagramWebChallengeRequired(result) && (parseErr == nil || result.RedirectURL != "") {
 			return c.startInstagramWebCheckpoint(ctx, result)
-		} else if parseErr == nil && result.Message != "" {
-			return nil, fmt.Errorf("instagram web login failed: %s", result.Message)
+		} else if parseErr == nil && result.errorMessage() != "" {
+			return nil, fmt.Errorf("instagram web login failed: %s", result.errorMessage())
 		}
 		return nil, fmt.Errorf("instagram web login request failed: %w", requestErr)
 	} else if response == nil {
@@ -578,19 +596,19 @@ func (c *Client) CreateInstagramWebSession(
 	} else if instagramWebCredentialsRejected(result) {
 		return nil, ErrInstagramWebCredentialsRejected
 	} else if result.TwoFactorRequired {
-		return c.captureInstagramWebTwoFactor(result, identifier, preResponseCSRFToken, response.StatusCode)
+		return c.captureInstagramWebTwoFactor(ctx, result, identifier, preResponseCSRFToken, response.StatusCode)
 	} else if instagramWebChallengeRequired(result) {
 		return c.startInstagramWebCheckpoint(ctx, result)
 	} else if !result.Authenticated {
 		user := gjson.GetBytes(body, "user").Type
 		c.log.Debug().Str("authenticated_type", gjson.GetBytes(body, "authenticated").Type.String()).
 			Str("user_type", user.String()).
-			Bool("has_error_message", result.Message != "").
+			Bool("has_error_message", result.errorMessage() != "").
 			Bool("has_error_type", result.ErrorType != "").
 			Bool("session_cookie_present", c.cookies.Get(cookies.IGCookieSessionID) != "").
 			Msg("Instagram web login did not authenticate")
-		if result.Message != "" {
-			return nil, fmt.Errorf("instagram web login failed: %s", result.Message)
+		if message := result.errorMessage(); message != "" {
+			return nil, fmt.Errorf("instagram web login failed: %s", message)
 		}
 		if result.Status == "ok" && result.ErrorType == "" && result.RedirectURL == "" && gjson.GetBytes(body, "authenticated").Type == gjson.False &&
 			(user == gjson.True || user == gjson.False) && c.cookies.Get(cookies.IGCookieSessionID) == "" {
@@ -714,6 +732,10 @@ func (c *Client) resendInstagramWebTwoFactorSMS(ctx context.Context, state *inst
 	}
 	var result instagramWebLoginResponse
 	parseErr := json.Unmarshal(body, &result)
+	if parseErr == nil && response != nil && response.StatusCode == http.StatusBadRequest &&
+		result.Status == "fail" && result.ErrorType == "rate_limit_error" {
+		requestErr = httpclient.ErrRateLimited
+	}
 	if requestErr != nil {
 		c.logInstagramWebRequestRejection(
 			"Instagram web two-factor SMS request was rejected",
@@ -802,6 +824,38 @@ func (c *Client) completeInstagramWebTwoFactorLegacy(
 			return errInstagramWebTwoFactorSMSRejected
 		}
 		return ErrInstagramWebTwoFactorCodeRejected
+	}
+	return nil
+}
+
+func (c *Client) sendInstagramWebTwoFactorCode(ctx context.Context, state *instagramWebTwoFactorState) error {
+	variables, err := json.Marshal(map[string]string{
+		"challenge":          state.method,
+		"encryptedContext":   state.encryptedContext,
+		"maskedContactPoint": state.maskedContactPoint,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal Instagram web verification request: %w", err)
+	}
+	c.cookies.Set(cookies.IGCookieCSRFToken, state.csrfToken)
+	rq := c.http.NewHTTPQuery()
+	rq.FbAPIReqFriendlyName = "useTwoStepVerificationSendCodeMutation"
+	rq.DocID = instagramWebTwoFactorSendCodeDocID
+	rq.Variables = string(variables)
+	body, err := c.instagramWebGraphQLRequest(ctx, rq, c.GetEndpoint("login_two_step_verification"), state.csrfToken)
+	if csrfToken := c.cookies.Get(cookies.IGCookieCSRFToken); csrfToken != "" {
+		state.csrfToken = csrfToken
+	}
+	if err != nil {
+		return fmt.Errorf("failed to request an Instagram web verification code: %w", err)
+	}
+	body = bytes.TrimPrefix(bytes.TrimSpace(body), httpclient.AntiJSPrefix)
+	result := gjson.GetBytes(body, "data.xfb_two_step_verification_send_notification")
+	if result.Get("is_success").Type != gjson.True {
+		if message := result.Get("error_message").String(); message != "" {
+			return fmt.Errorf("instagram could not send a web verification code: %s", message)
+		}
+		return errors.New("instagram could not send a web verification code")
 	}
 	return nil
 }
@@ -905,6 +959,7 @@ func (c *Client) CompleteInstagramWebSessionTwoFactor(
 	if err != nil {
 		if errors.Is(err, errInstagramWebTwoFactorSMSRejected) && !state.smsReplacementSent &&
 			state.encryptedContext == "" && state.method == "SMS" {
+			c.cookies.Set(cookies.IGCookieCSRFToken, state.csrfToken)
 			if resendErr := c.resendInstagramWebTwoFactorSMS(ctx, state); resendErr != nil {
 				return fmt.Errorf("failed to request a replacement Instagram SMS code: %w", resendErr)
 			}

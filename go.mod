@@ -11,6 +11,7 @@ require (
 	github.com/beeper/poly1305 v0.0.0-20250815183548-d4eede7bbf3c
 	github.com/coder/websocket v1.8.15
 	github.com/gabriel-vasile/mimetype v1.4.15
+	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/go-querystring v1.2.0
 	github.com/google/uuid v1.6.0
 	github.com/imroc/req/v3 v3.56.0
@@ -31,7 +32,7 @@ require (
 	golang.org/x/net v0.59.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
-	maunium.net/go/mautrix v0.31.1-0.20260919103532-1f3ae33f3f52
+	maunium.net/go/mautrix v0.31.1-0.20260925133620-c6024bacd2e6
 )
 
 require (
@@ -40,7 +41,7 @@ require (
 	buf.build/go/protoyaml v0.7.0 // indirect
 	cel.dev/expr v0.25.2 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect
-	github.com/andybalholm/brotli v1.2.2 // indirect
+	github.com/andybalholm/brotli v1.2.4 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/beeper/argo-go v1.1.2 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
@@ -60,7 +61,7 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/icholy/digest v1.2.0 // indirect
 	github.com/jxskiss/base62 v1.1.0 // indirect
-	github.com/klauspost/compress v1.19.2 // indirect
+	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/lib/pq v1.12.3 // indirect
 	github.com/lithammer/shortuuid/v4 v4.3.0 // indirect
@@ -128,6 +129,6 @@ require (
 	maunium.net/go/mauflag v1.0.0 // indirect
 )
 
-replace github.com/imroc/req/v3 => github.com/beeper/req/v3 v3.0.0-20260808092153-100cef0a2fbd
+replace github.com/imroc/req/v3 => github.com/beeper/req/v3 v3.0.0-20260925135712-b49593750e56
 
-replace maunium.net/go/mautrix => github.com/MaximilianGaedig/mautrix-go v0.31.1-0.20260924214845-59cd6e4dea34
+replace maunium.net/go/mautrix => github.com/MaximilianGaedig/mautrix-go v0.31.1-0.20260929140312-525b9a465326
