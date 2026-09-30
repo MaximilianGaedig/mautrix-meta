@@ -431,6 +431,19 @@ func (e *groupE2ee) encryptTransform(log zerolog.Logger) callbridge.FrameTransfo
 	}
 }
 
+// encryptVideoTransform encrypts the Matrix user's camera frames for the call, with the frame
+// handler the web client picks for the codec (H264 keeps its NAL headers in the clear).
+func (e *groupE2ee) encryptVideoTransform(mime string, log zerolog.Logger) callbridge.FrameTransform {
+	handler := framecrypt.HandlerForCodec(false, strings.ToUpper(mime))
+	fl := newFrameLog(log, "encrypt")
+	return func(frame []byte) ([]byte, error) {
+		out, err := e.enc.Encrypt(e.ctx, handler, frame)
+		fl.result(err)
+		fl.sample(frame, out)
+		return out, err
+	}
+}
+
 // decryptor creates the decryptor of a remote participant's track.
 func (e *groupE2ee) decryptor(e2eeID string, audio bool, log zerolog.Logger) (callbridge.FrameTransform, func(), error) {
 	if uid, _, _ := strings.Cut(e2eeID, ":"); e.isUntrusted(uid) {

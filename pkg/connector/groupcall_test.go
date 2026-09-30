@@ -21,8 +21,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/callbridge"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
@@ -108,5 +110,31 @@ func TestGroupCallSubscribesToScreenShares(t *testing.T) {
 	}
 	if !g.screens["scr"] || g.screens["cam"] {
 		t.Errorf("screens = %v, want only the screen track", g.screens)
+	}
+}
+
+// Once the Matrix user's camera is added, the SFU is told about it with the audio, both owned by us:
+// joined receive-only, the bridge never sent a camera into Messenger group calls.
+func TestGroupCallReportsOwnCamera(t *testing.T) {
+	cb := &callBridge{log: zerolog.Nop(), m: &MetaClient{UserLogin: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "100"}}}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "556"}}}
+	g, err := cb.newGroupCall(context.Background(), portal, "556", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leg := &callbridge.Leg{TrackID: "aud", VideoTrackID: "vid"}
+	if got := g.ownTracks(leg, true, true); len(got) != 1 || got["aud"].Label != rtcsignal.TrackLabelAudio {
+		t.Fatalf("before the camera: %v, want only our audio", got)
+	}
+	leg.LocalVideo, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "vid", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := g.ownTracks(leg, true, false)
+	if v := got["vid"]; v.Label != rtcsignal.TrackLabelVideo || v.Enabled || v.Owner != "100" {
+		t.Errorf("our camera = %+v, want a disabled video track owned by us", v)
+	}
+	if a := got["aud"]; !a.Enabled || a.Owner != "100" {
+		t.Errorf("our audio = %+v", a)
 	}
 }

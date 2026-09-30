@@ -117,6 +117,7 @@ type groupCall struct {
 	owners         map[string]string // Messenger track id -> owner user id (SMU media status)
 	subscribed     map[string]bool   // video track ids with a TRACK subscription
 	screens        map[string]bool   // track ids that are a participant's shared screen
+	sentMediaState *[2]bool          // the Matrix user's microphone and camera state last told to the SFU
 	participants   map[string]*groupParticipant
 	upstream       *groupParticipant // whose LiveKit leg takes the Matrix user's media
 	focus          *rtcTransport
@@ -387,6 +388,8 @@ func (g *groupCall) joinRTC(p *groupParticipant) error {
 	if upstream {
 		leg.OnPeers(g.onRTCPeers)
 		go g.relayUserAudio(leg)
+		go g.relayUserVideo(leg)
+		leg.OnMediaState(func(audioOn, videoOn bool) { go g.sendOwnMediaState(audioOn, videoOn) })
 	}
 	resp, err := cli.SendStateEvent(g.ctx, g.portal.MXID, evtCallMember, rtcStateKey(cli.UserID, rtcDeviceID),
 		rtcMemberContent(focus, g.portal.MXID, rtcDeviceID, string(cli.UserID), false, created))
@@ -523,6 +526,140 @@ func (g *groupCall) relayUserAudio(rtc *callbridge.RTCLeg) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// relayUserVideo sends the Matrix user's camera to Messenger's SFU. The call is joined receiving
+// video only; when the camera comes on, a video track is added and offered to the SFU the way the
+// web client turns its camera on (CLIENT_MEDIA_UPDATE with the tracks and an offer). Each new camera
+// track (Element Call publishes a new one when the camera is turned off and on) is relayed into the
+// same outgoing track.
+func (g *groupCall) relayUserVideo(rtc *callbridge.RTCLeg) {
+	for g.ctx.Err() == nil {
+		tr, err := rtc.RemoteVideo(g.ctx)
+		if err != nil {
+			return
+		}
+		var leg *callbridge.Leg
+		var crypt *groupE2ee
+		for g.ctx.Err() == nil {
+			g.lock.Lock()
+			l, c, joined := g.leg, g.crypt, g.joined
+			g.lock.Unlock()
+			if l != nil && joined {
+				leg, crypt = l, c
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if leg == nil {
+			return
+		}
+		mime := tr.Codec().MimeType
+		log := g.log.With().Str("from", "matrixrtc").Str("codec", mime).Logger()
+		if leg.LocalVideo == nil {
+			if err = g.offerOwnVideo(leg, mime); err != nil {
+				log.Err(err).Msg("Failed to start sending the Matrix user's camera to Messenger")
+				return
+			}
+		}
+		leg.OnKeyframeRequest(func() { rtc.RequestKeyframe(tr) })
+		go func() {
+			for _, d := range []time.Duration{0, 600 * time.Millisecond, time.Second} {
+				time.Sleep(d)
+				rtc.RequestKeyframe(tr)
+			}
+		}()
+		log.Info().Msg("Relaying the Matrix user's camera to Messenger")
+		go g.sendOwnMediaState(rtc.MediaState())
+		if crypt != nil {
+			var stats callbridge.FrameRelayStats
+			xf := crypt.encryptVideoTransform(mime, log)
+			err = callbridge.RelayVideoTransformed(g.ctx, tr, uint8(tr.PayloadType()), mime, leg.LocalVideo, xf, func() { rtc.RequestKeyframe(tr) }, &stats, log)
+			log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Uint64("frames", stats.Frames.Load()).
+				Msg("Matrix camera relay stopped")
+			continue
+		}
+		var stats callbridge.RelayStats
+		err = callbridge.RelayVideo(g.ctx, tr, uint8(tr.PayloadType()), leg.LocalVideo, &stats, log)
+		log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Matrix camera relay stopped")
+	}
+}
+
+// offerOwnVideo adds a video track to the SFU connection and offers it, with our tracks' state.
+func (g *groupCall) offerOwnVideo(leg *callbridge.Leg, mime string) error {
+	id := g.m.callIdentity()
+	g.lock.Lock()
+	cc := g.cc
+	g.lock.Unlock()
+	if id == nil || cc == nil {
+		return errors.New("not in the Messenger call")
+	}
+	if err := leg.AddVideoTrack(mime); err != nil {
+		return fmt.Errorf("add video track: %w", err)
+	}
+	offer, err := leg.Renegotiate()
+	if err == nil {
+		offer, err = metacall.PrepareLocalSDP(offer, id, true)
+	}
+	if err != nil {
+		return fmt.Errorf("create video offer: %w", err)
+	}
+	version, err := callbridge.SDPVersion(offer)
+	if err != nil {
+		leg.RollbackOffer()
+		return fmt.Errorf("video offer version: %w", err)
+	}
+	resp, err := g.cb.sig.Request(g.ctx, cc.NewClientMediaUpdate(version, g.ownTracks(leg, true, true), offer))
+	if err != nil {
+		leg.RollbackOffer()
+		return fmt.Errorf("CLIENT_MEDIA_UPDATE (version %d): %w", version, err)
+	}
+	cmu := resp.Body.ClientMediaUpdateResponse
+	if cmu == nil || cmu.Answer == nil || cmu.Answer.SDP == "" {
+		// The SFU's answer comes as a SERVER_MEDIA_UPDATE instead (handleServerMediaUpdate).
+		g.log.Info().Int64("version", version).Msg("Offered the Matrix user's camera, waiting for the SFU's answer")
+		return nil
+	}
+	if err = leg.SetRenegotiationAnswer(metacall.PrepareRemoteSDP(cmu.Answer.SDP)); err != nil {
+		return fmt.Errorf("apply the SFU's answer: %w", err)
+	}
+	g.log.Info().Int64("version", version).Msg("The SFU accepted the Matrix user's camera")
+	return nil
+}
+
+// ownTracks is our tracks' state as Messenger's media status carries it.
+func (g *groupCall) ownTracks(leg *callbridge.Leg, audioOn, videoOn bool) map[string]rtcsignal.TrackInfo {
+	self := strconv.FormatInt(g.m.selfFBID(), 10)
+	tracks := map[string]rtcsignal.TrackInfo{leg.TrackID: {Enabled: audioOn, Owner: self, Label: rtcsignal.TrackLabelAudio}}
+	if leg.LocalVideo != nil {
+		tracks[leg.VideoTrackID] = rtcsignal.TrackInfo{Enabled: videoOn, Owner: self, Label: rtcsignal.TrackLabelVideo}
+	}
+	return tracks
+}
+
+// sendOwnMediaState tells the SFU whether the Matrix user's microphone and camera are on, so the
+// Messenger participants see them muted rather than a frozen picture.
+func (g *groupCall) sendOwnMediaState(audioOn, videoOn bool) {
+	g.lock.Lock()
+	leg, cc := g.leg, g.cc
+	state := [2]bool{audioOn, videoOn}
+	same := g.sentMediaState != nil && *g.sentMediaState == state
+	g.lock.Unlock()
+	if same || leg == nil || cc == nil || leg.PC.CurrentLocalDescription() == nil {
+		return
+	}
+	version, err := callbridge.SDPVersion(leg.PC.CurrentLocalDescription().SDP)
+	if err != nil {
+		return
+	}
+	if _, err = g.cb.sig.Request(g.ctx, cc.NewClientMediaUpdate(version, g.ownTracks(leg, audioOn, videoOn), "")); err != nil {
+		g.log.Err(err).Msg("Failed to pass the Matrix user's camera and microphone state to Messenger")
+		return
+	}
+	g.lock.Lock()
+	g.sentMediaState = &state
+	g.lock.Unlock()
+	g.log.Info().Bool("audio_on", audioOn).Bool("video_on", videoOn).Msg("Passed the Matrix user's camera and microphone state to Messenger")
 }
 
 // --- Messenger side ---
@@ -804,9 +941,13 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 	resp := &rtcsignal.ServerMediaUpdateResponse{CurrentVersion: smu.ToVersion}
 	if leg != nil {
 		// Like the web client, report our own track with the response.
-		resp.MediaStatus = map[string]rtcsignal.TrackInfo{leg.TrackID: {
-			Enabled: true, Owner: strconv.FormatInt(g.m.selfFBID(), 10), Label: rtcsignal.TrackLabelAudio,
-		}}
+		audioOn, videoOn := true, true
+		g.lock.Lock()
+		if g.sentMediaState != nil {
+			audioOn, videoOn = g.sentMediaState[0], g.sentMediaState[1]
+		}
+		g.lock.Unlock()
+		resp.MediaStatus = g.ownTracks(leg, audioOn, videoOn)
 	}
 	if leg == nil {
 		return g.respond(msg, rtcsignal.Body{ServerMediaUpdateResponse: resp})
@@ -846,7 +987,8 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 	}
 	if answer != "" {
 		if id := g.m.callIdentity(); id != nil {
-			if signed, err := metacall.PrepareLocalSDP(answer, id, false); err == nil {
+			// Sending video only once the Matrix user's camera has been added (relayUserVideo).
+			if signed, err := metacall.PrepareLocalSDP(answer, id, leg.LocalVideo != nil); err == nil {
 				answer = signed
 			}
 		}
