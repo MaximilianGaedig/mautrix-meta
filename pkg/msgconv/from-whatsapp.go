@@ -200,7 +200,6 @@ func (mc *MessageConverter) reuploadWhatsAppAttachment(
 	mediaType whatsmeow.MediaType,
 	convert convertFunc,
 ) (*bridgev2.ConvertedMessagePart, error) {
-	client := ctx.Value(mediadl.ContextKeyWAClient).(*whatsmeow.Client)
 	intent := ctx.Value(mediadl.ContextKeyIntent).(bridgev2.MatrixAPI)
 	portal := ctx.Value(mediadl.ContextKeyPortal).(*bridgev2.Portal)
 
@@ -246,7 +245,7 @@ func (mc *MessageConverter) reuploadWhatsAppAttachment(
 			Extra: make(map[string]any),
 		}, nil
 	}
-	data, err := client.DownloadFB(ctx, transport.GetIntegral(), mediaType)
+	data, err := downloadWAMedia(ctx, transport.GetIntegral(), mediaType)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaDownloadFailed, err)
 	}
@@ -691,17 +690,6 @@ func (mc *MessageConverter) waArmadilloToMatrix(ctx context.Context, rawContent 
 	return
 }
 
-func (mc *MessageConverter) instamadilloToMatrix(ctx context.Context, rawContent *instamadilloAddMessage.AddMessagePayload) (parts []*bridgev2.ConvertedMessagePart, replyOverride *waCommon.MessageKey) {
-	// TODO implement
-	return []*bridgev2.ConvertedMessagePart{{
-		Type: event.EventMessage,
-		Content: &event.MessageEventContent{
-			MsgType: event.MsgNotice,
-			Body:    "Unsupported encrypted Instagram message",
-		},
-	}}, nil
-}
-
 func (mc *MessageConverter) WhatsAppToMatrix(
 	ctx context.Context,
 	portal *bridgev2.Portal,
@@ -804,8 +792,10 @@ func (mc *MessageConverter) WhatsAppToMatrix(
 		pcp, _ := types.ParseJID(replyOverride.GetParticipant())
 		// TODO what if participant is not set?
 		cm.ReplyTo = &networkid.MessageOptionalPartID{
-			MessageID: metaid.MakeWAMessageID(evt.Info.Chat, pcp, qm.GetStanzaID()),
+			MessageID: metaid.MakeWAMessageID(evt.Info.Chat, pcp, replyOverride.GetID()),
 		}
+	} else if igMsg, ok := evt.Message.(*instamadilloAddMessage.AddMessagePayload); ok {
+		cm.ReplyTo = mc.igReplyTarget(ctx, portal.PortalKey, igMsg)
 	}
 	for i, part := range cm.Parts {
 		part.ID = metaid.MakeMessagePartID(i)

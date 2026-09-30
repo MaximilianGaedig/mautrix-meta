@@ -309,11 +309,7 @@ func (evt *WAMessageEvent) GetTargetMessage() networkid.MessageID {
 	}
 	consumerApp, ok := evt.Message.(*waConsumerApplication.ConsumerApplication)
 	if !ok {
-		//payload, ok := evt.Message.(*instamadilloSupplementMessage.SupplementMessagePayload)
-		//if ok {
-		//	// TODO return target message
-		//}
-		return ""
+		return evt.instamadilloTarget()
 	}
 	switch typedPayload := consumerApp.GetPayload().GetPayload().(type) {
 	case *waConsumerApplication.ConsumerApplication_Payload_Content:
@@ -330,6 +326,21 @@ func (evt *WAMessageEvent) GetTargetMessage() networkid.MessageID {
 		}
 	}
 	return ""
+}
+
+// instamadilloTarget is the message that an encrypted Instagram reaction, edit or deletion is about. They name
+// the message by the ID its sender gave it, without saying who that was.
+func (evt *WAMessageEvent) instamadilloTarget() networkid.MessageID {
+	var otid string
+	switch typed := evt.Message.(type) {
+	case *instamadilloSupplementMessage.SupplementMessagePayload:
+		otid = typed.GetTargetMessageOtid()
+	case *instamadilloDeleteMessage.DeleteMessagePayload:
+		otid = typed.GetMessageOtid()
+	default:
+		return ""
+	}
+	return evt.m.Main.MsgConv.FindWAMessage(evt.m.Main.Bridge.BackgroundCtx, evt.GetPortalKey(), otid)
 }
 
 func (m *MetaClient) messageIDToWAKey(id metaid.ParsedWAMessageID) *waCommon.MessageKey {

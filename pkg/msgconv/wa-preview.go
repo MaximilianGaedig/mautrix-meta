@@ -50,20 +50,27 @@ func (mc *MessageConverter) waPreviewThumbnail(ctx context.Context, msg *waConsu
 		log.Err(err).Msg("Failed to download link preview thumbnail")
 		return
 	}
+	uploadPreviewImage(ctx, data, int(thumbnail.GetAncillary().GetWidth()), int(thumbnail.GetAncillary().GetHeight()), preview)
+}
+
+// uploadPreviewImage uploads the image of a link preview and sets it on the preview. When the upload fails the
+// preview has no image.
+func uploadPreviewImage(ctx context.Context, data []byte, width, height int, preview *event.BeeperLinkPreview) {
 	preview.ImageType = http.DetectContentType(data)
 	preview.ImageSize = event.IntOrString(len(data))
-	preview.ImageWidth = event.IntOrString(thumbnail.GetAncillary().GetWidth())
-	preview.ImageHeight = event.IntOrString(thumbnail.GetAncillary().GetHeight())
-	if preview.ImageWidth == 0 || preview.ImageHeight == 0 {
+	preview.ImageWidth = event.IntOrString(width)
+	preview.ImageHeight = event.IntOrString(height)
+	if width == 0 || height == 0 {
 		if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
 			preview.ImageWidth, preview.ImageHeight = event.IntOrString(cfg.Width), event.IntOrString(cfg.Height)
 		}
 	}
 	intent := ctx.Value(mediadl.ContextKeyIntent).(bridgev2.MatrixAPI)
 	portal := ctx.Value(mediadl.ContextKeyPortal).(*bridgev2.Portal)
+	var err error
 	preview.ImageURL, preview.ImageEncryption, err = intent.UploadMedia(ctx, portal.MXID, data, "", preview.ImageType)
 	if err != nil {
-		log.Err(err).Msg("Failed to reupload link preview thumbnail")
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to reupload link preview thumbnail")
 		preview.ImageURL, preview.ImageEncryption = "", nil
 		preview.ImageType, preview.ImageSize, preview.ImageWidth, preview.ImageHeight = "", 0, 0, 0
 	}

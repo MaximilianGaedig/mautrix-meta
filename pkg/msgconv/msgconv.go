@@ -17,7 +17,11 @@
 package msgconv
 
 import (
+	"context"
+
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/types"
 	"go.mau.fi/mautrix-meta/pkg/metadb"
@@ -33,6 +37,10 @@ type MessageConverter struct {
 	HTMLParser      *textfmt.MatrixHTMLParser
 	DB              *metadb.MetaDB
 	DirectMedia     bool
+
+	// RecentMessages lists the latest messages of a chat. It defaults to the bridge database and is a field so
+	// that tests can supply messages.
+	RecentMessages func(ctx context.Context, portal networkid.PortalKey, n int) ([]*database.Message, error)
 }
 
 func New(br *bridgev2.Bridge, db *metadb.MetaDB) *MessageConverter {
