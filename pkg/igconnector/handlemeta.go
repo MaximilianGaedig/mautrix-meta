@@ -661,11 +661,6 @@ func (ic *IGClient) handleMuteThread(portalKey networkid.PortalKey, isMuted bool
 	})
 }
 
-func (ic *IGClient) handlePinMessages(key networkid.PortalKey, evt *slidetypes.PinMessageEvent) bridgev2.EventHandlingResult {
-	// TODO pinned messages aren't plumbed through bridgev2 yet
-	return bridgev2.EventHandlingResultIgnored
-}
-
 func (ic *IGClient) handleTyping(ctx context.Context, evt *slidetypes.TypingNotification) error {
 	threadKey, err := ic.Main.DB.GetFBIDForIGThread(ctx, evt.ThreadID, ic.UserLogin.ID)
 	if err != nil {
