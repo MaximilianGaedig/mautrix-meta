@@ -18,7 +18,10 @@ import (
 	"go.mau.fi/whatsmeow/proto/instamadilloCoreTypeMedia"
 	"go.mau.fi/whatsmeow/proto/instamadilloCoreTypeText"
 	"go.mau.fi/whatsmeow/proto/instamadilloXmaContentRef"
+	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waConsumerApplication"
 	"go.mau.fi/whatsmeow/proto/waMediaTransport"
+	"go.mau.fi/whatsmeow/proto/waMsgApplication"
 	waTypes "go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"maunium.net/go/mautrix/bridgev2"
@@ -359,5 +362,35 @@ func TestDecodeIGBinary(t *testing.T) {
 	}
 	if decodeIGBinary("", 32) != nil {
 		t.Error("empty stays empty")
+	}
+}
+
+func TestInstagramEncryptedForwardedMessageIsLabelled(t *testing.T) {
+	payload := igPayload(igTextContent("passing this on"))
+	payload.Metadata = &instamadilloAddMessage.AddMessageMetadata{
+		ForwardingParams: &instamadilloAddMessage.ForwardingParams{ForwardedThreadID: ptr.Ptr("fake-thread")},
+	}
+	cm, _ := convertIG(t, &MessageConverter{}, payload)
+	if got := cm.Parts[0].Content.Body; got != "↷ Forwarded\n\npassing this on" {
+		t.Errorf("body = %q", got)
+	}
+}
+
+func TestMessengerEncryptedForwardedMessageIsLabelled(t *testing.T) {
+	ctx, _ := waTestContext()
+	intent := &fakeIntent{}
+	portal := &bridgev2.Portal{Portal: &database.Portal{}}
+	evt := &events.FBMessage{
+		Message: &waConsumerApplication.ConsumerApplication{Payload: &waConsumerApplication.ConsumerApplication_Payload{
+			Payload: &waConsumerApplication.ConsumerApplication_Payload_Content{Content: &waConsumerApplication.ConsumerApplication_Content{
+				Content: &waConsumerApplication.ConsumerApplication_Content_MessageText{MessageText: &waCommon.MessageText{Text: ptr.Ptr("from elsewhere")}},
+			}},
+		}},
+		FBApplication: &waMsgApplication.MessageApplication{Metadata: &waMsgApplication.MessageApplication_Metadata{IsForwarded: ptr.Ptr(true)}},
+	}
+	evt.Info.Chat = testIGChat
+	cm := (&MessageConverter{}).WhatsAppToMatrix(ctx, portal, nil, nil, nil, intent, "wa:fake", evt)
+	if got := cm.Parts[0].Content.Body; got != "↷ Forwarded\n\nfrom elsewhere" {
+		t.Errorf("body = %q", got)
 	}
 }

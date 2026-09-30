@@ -171,6 +171,9 @@ func (mc *MessageConverter) ToMatrix(
 		zerolog.Ctx(ctx).Warn().Type("content_struct", content).Msg("Unrecognized content struct in message")
 		cm.Parts = append(cm.Parts, mc.wrapUnsupportedContent(content))
 	}
+	if msg.IGDIsForwarded {
+		textfmt.MarkForwarded(cm.Parts)
+	}
 	return cm
 }
 

@@ -324,6 +324,9 @@ func (mc *MessageConverter) ToMatrix(
 		// exactly one item in the slice and it is the media part ID.
 		cm.Parts[0].ID = importantPartIDs[0]
 	}
+	if msg.IsForwarded {
+		textfmt.MarkForwarded(cm.Parts)
+	}
 	return cm
 }
 

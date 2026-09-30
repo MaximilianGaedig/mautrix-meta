@@ -797,6 +797,13 @@ func (mc *MessageConverter) WhatsAppToMatrix(
 	} else if igMsg, ok := evt.Message.(*instamadilloAddMessage.AddMessagePayload); ok {
 		cm.ReplyTo = mc.igReplyTarget(ctx, portal.PortalKey, igMsg)
 	}
+	forwarded := evt.FBApplication.GetMetadata().GetIsForwarded()
+	if igMsg, ok := evt.Message.(*instamadilloAddMessage.AddMessagePayload); ok && igMsg.GetMetadata().GetForwardingParams() != nil {
+		forwarded = true
+	}
+	if forwarded {
+		textfmt.MarkForwarded(cm.Parts)
+	}
 	for i, part := range cm.Parts {
 		part.ID = metaid.MakeMessagePartID(i)
 		if part.Content.Mentions == nil {
