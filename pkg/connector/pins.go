@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
@@ -66,6 +67,14 @@ func pinsByThread(tbl *table.LSTable) []*threadPins {
 }
 
 func (m *MetaClient) handlePins(tk handlerParams, tp *threadPins) bridgev2.RemoteEvent {
+	// Pins in encrypted chats have not been seen yet; their message IDs may not be the plain FB IDs
+	// used here. Log what arrives so the first real one shows its shape.
+	zerolog.Ctx(tk.ctx).Info().
+		Int64("thread_key", tp.ThreadKey).
+		Int64("thread_type", int64(tk.Type)).
+		Any("pin_changes", tp.Info.PinChanges).
+		Any("pinned_messages", tp.Info.PinnedMessages).
+		Msg("Received pinned messages")
 	return m.wrapChatInfoChange(tk.ID, 0, tk.Type, &bridgev2.ChatInfoChange{ChatInfo: tp.Info}, "pins")
 }
 
