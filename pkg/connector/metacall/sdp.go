@@ -68,7 +68,31 @@ func PrepareLocalSDP(sdp string, id *Identity, video bool) (string, error) {
 
 // PrepareRemoteSDP removes Meta-only attributes before passing SDP to Pion.
 func PrepareRemoteSDP(sdp string) string {
-	return callbridge.CollapseSimulcast(rtcsignal.StripDtlsAuth(sdp))
+	return markICELite(callbridge.CollapseSimulcast(rtcsignal.StripDtlsAuth(sdp)))
+}
+
+// markICELite declares Messenger's side ICE-lite, which makes the bridge the controlling agent
+// (RFC 8445 6.1.1: a full agent facing a lite one controls).
+//
+// Messenger's peers act as the controlled agent whichever side made the offer. When the bridge
+// answered a Messenger offer - every incoming call - both ends were controlled: Pion logged "Role
+// conflict ... same role(controlled)", nobody nominated a pair, and once Messenger renegotiated
+// (a camera turned on or off restarts ICE) the connection lost consent 30 s later and the call
+// dropped. Calls the bridge offered, where it was controlling anyway, never did.
+func markICELite(sdp string) string {
+	if sdp == "" || strings.Contains(sdp, "a=ice-lite") {
+		return sdp
+	}
+	i := strings.Index(sdp, "\nm=")
+	if i < 0 {
+		return sdp
+	}
+	eol := "\n"
+	if i > 0 && sdp[i-1] == '\r' {
+		eol = "\r\n"
+		i--
+	}
+	return sdp[:i] + eol + "a=ice-lite" + sdp[i:]
 }
 
 // AnswerDelta converts a Meta SFU delta, applies it to leg, and answers it.
