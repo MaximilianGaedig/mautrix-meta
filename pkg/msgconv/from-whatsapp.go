@@ -433,7 +433,7 @@ func (mc *MessageConverter) waConsumerToMatrix(ctx context.Context, rawContent *
 		parts = append(parts, mc.WhatsAppTextToMatrix(ctx, content.MessageText))
 	case *waConsumerApplication.ConsumerApplication_Content_ExtendedTextMessage:
 		part := mc.WhatsAppTextToMatrix(ctx, content.ExtendedTextMessage.GetText())
-		// TODO convert url previews
+		part.Content.BeeperLinkPreviews = mc.waLinkPreviews(ctx, content.ExtendedTextMessage)
 		parts = append(parts, part)
 	case *waConsumerApplication.ConsumerApplication_Content_ImageMessage,
 		*waConsumerApplication.ConsumerApplication_Content_StickerMessage,
@@ -469,21 +469,9 @@ func (mc *MessageConverter) waConsumerToMatrix(ctx context.Context, rawContent *
 			},
 		})
 	case *waConsumerApplication.ConsumerApplication_Content_ContactMessage:
-		parts = append(parts, &bridgev2.ConvertedMessagePart{
-			Type: event.EventMessage,
-			Content: &event.MessageEventContent{
-				MsgType: event.MsgNotice,
-				Body:    "Unsupported message (contact)\n\nPlease open in the " + appName(ctx),
-			},
-		})
+		parts = append(parts, mc.waContactToMatrix(ctx, content.ContactMessage))
 	case *waConsumerApplication.ConsumerApplication_Content_ContactsArrayMessage:
-		parts = append(parts, &bridgev2.ConvertedMessagePart{
-			Type: event.EventMessage,
-			Content: &event.MessageEventContent{
-				MsgType: event.MsgNotice,
-				Body:    "Unsupported message (contacts array)\n\nPlease open in the " + appName(ctx),
-			},
-		})
+		parts = append(parts, mc.waContactsArrayToMatrix(ctx, content.ContactsArrayMessage))
 	default:
 		zerolog.Ctx(ctx).Warn().Type("content_type", content).Msg("Unrecognized content type")
 		parts = append(parts, &bridgev2.ConvertedMessagePart{

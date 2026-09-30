@@ -12,7 +12,6 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
-	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/types"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
@@ -147,40 +146,25 @@ func (m *MetaClient) e2eeEventHandler(rawEvt any) bool {
 			Message:    evt.PermanentDisconnectDescription(),
 		}
 		m.UserLogin.BridgeState.Send(m.waState)
-	case *events.GroupInfo:
-		portalKey := m.makeWAPortalKey(evt.JID)
-		memberChanges := &bridgev2.ChatMemberList{
-			MemberMap: make(map[networkid.UserID]bridgev2.ChatMember),
+	case *events.GroupInfo, *events.Picture:
+		if change := m.waChatInfoEvent(rawEvt); change != nil {
+			m.UserLogin.QueueRemoteEvent(change)
 		}
-		for _, userID := range evt.Join {
-			memberChanges.MemberMap.Set(bridgev2.ChatMember{
-				EventSender: m.makeWAEventSender(userID),
-				Membership:  event.MembershipJoin,
-			})
+	case *events.UndecryptableMessage:
+		log.Debug().
+			Any("info", evt.Info).
+			Bool("unavailable", evt.IsUnavailable).
+			Str("decrypt_fail", string(evt.DecryptFailMode)).
+			Msg("Received undecryptable WhatsApp message")
+		notice := m.waUndecryptableMessage(evt)
+		if notice == nil {
+			return true
 		}
-		for _, userID := range evt.Leave {
-			memberChanges.MemberMap.Set(bridgev2.ChatMember{
-				EventSender:    m.makeWAEventSender(userID),
-				Membership:     event.MembershipLeave,
-				PrevMembership: event.MembershipJoin,
-			})
+		if !m.Main.Bridge.QueueRemoteEvent(m.UserLogin, &EnsureWAChatStateEvent{JID: evt.Info.Chat, m: m}).Success {
+			return false
 		}
-		if len(memberChanges.MemberMap) > 0 {
-			eventMeta := simplevent.EventMeta{
-				Type:      bridgev2.RemoteEventChatInfoChange,
-				PortalKey: portalKey,
-				Timestamp: evt.Timestamp,
-			}
-			if evt.Sender != nil {
-				eventMeta.Sender = m.makeWAEventSender(*evt.Sender)
-			}
-			m.UserLogin.QueueRemoteEvent(&simplevent.ChatInfoChange{
-				EventMeta: eventMeta,
-				ChatInfoChange: &bridgev2.ChatInfoChange{
-					MemberChanges: memberChanges,
-				},
-			})
-		}
+		m.noteActivity(notice)
+		return m.Main.Bridge.QueueRemoteEvent(m.UserLogin, notice).Success
 	case *events.CallOffer, *events.CallOfferNotice, *events.CallPreAccept, *events.CallAccept,
 		*events.CallTransport, *events.CallRelayLatency, *events.CallTerminate, *events.CallReject,
 		*events.UnknownCallEvent:

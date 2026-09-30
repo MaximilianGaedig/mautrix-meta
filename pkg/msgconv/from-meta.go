@@ -385,7 +385,7 @@ func (mc *MessageConverter) blobAttachmentToMatrix(ctx context.Context, att *tab
 }
 
 func appName(ctx context.Context) string {
-	if ctx.Value(mediadl.ContextKeyFBClient).(*messagix.Client).GetPlatform().IsInstagram() {
+	if client, _ := ctx.Value(mediadl.ContextKeyFBClient).(*messagix.Client); client != nil && client.GetPlatform().IsInstagram() {
 		return "Instagram app"
 	}
 	return "Messenger app"
