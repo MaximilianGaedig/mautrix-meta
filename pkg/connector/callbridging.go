@@ -81,6 +81,57 @@ const (
 var matrixCallEventTypes = []event.Type{
 	event.CallInvite, event.CallCandidates, event.CallAnswer, event.CallReject,
 	event.CallSelectAnswer, event.CallNegotiate, event.CallHangup,
+	evtStreamMetadataChanged, evtStreamMetadataChangedUnstable,
+}
+
+// Element says which of its streams is which, and when its camera or microphone is turned off,
+// with MSC3077 stream metadata: in its invite and answer, and in these events after that.
+var (
+	evtStreamMetadataChanged         = event.Type{Type: "m.call.sdp_stream_metadata_changed", Class: event.MessageEventType}
+	evtStreamMetadataChangedUnstable = event.Type{Type: "org.matrix.call.sdp_stream_metadata_changed", Class: event.MessageEventType}
+)
+
+const (
+	streamMetadataKey         = "sdp_stream_metadata"
+	streamMetadataKeyUnstable = "org.matrix.msc3077.sdp_stream_metadata"
+)
+
+// streamMetadata is one stream's entry in MSC3077 stream metadata.
+type streamMetadata struct {
+	Purpose    string `json:"purpose"`
+	AudioMuted bool   `json:"audio_muted"`
+	VideoMuted bool   `json:"video_muted"`
+}
+
+// withStreamMetadata adds MSC3077 stream metadata for the Matrix leg's stream to a call event.
+//
+// Element shows no camera (or screen share) button in a voice call unless the other side sends
+// stream metadata (opponentSupportsSDPStreamMetadata), so without it a call could never turn into
+// a video call from Element. And once metadata is sent, Element ignores any stream it does not
+// name, so the stream is the leg's own msid stream.
+func withStreamMetadata(c *event.Content, leg *callbridge.Leg) *event.Content {
+	if leg == nil || leg.StreamID == "" {
+		return c
+	}
+	meta := map[string]streamMetadata{leg.StreamID: {Purpose: "m.usermedia", VideoMuted: leg.LocalVideo == nil}}
+	c.Raw[streamMetadataKey] = meta
+	c.Raw[streamMetadataKeyUnstable] = meta
+	return c
+}
+
+// readStreamMetadata reads MSC3077 stream metadata from a call event, under either key.
+func readStreamMetadata(evt *event.Event) map[string]streamMetadata {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(evt.Content.VeryRaw, &raw) != nil {
+		return nil
+	}
+	for _, key := range []string{streamMetadataKey, streamMetadataKeyUnstable} {
+		var meta map[string]streamMetadata
+		if data, ok := raw[key]; ok && json.Unmarshal(data, &meta) == nil {
+			return meta
+		}
+	}
+	return nil
 }
 
 // registerCallEventHandlers hooks m.call.* into the Matrix event processor;
@@ -297,12 +348,16 @@ type callSession struct {
 	joined         bool
 	metaAnswered   bool
 	upgrading      bool // Matrix leg being upgraded to video
+	metaUpgrading  bool // Messenger leg being upgraded to video for Element's camera
 	metaPrepare    sync.Once
 	metaICEOnce    sync.Once
 	metaICE        []webrtc.ICEServer
 	metaAnswer     string // incoming: our signed answer, prepared while ringing
 	metaAnswerErr  error
 	mediaConnected atomic.Bool
+	// videoFromMatrix is set once Element's camera is being relayed to Messenger, so a later
+	// renegotiation does not start a second relay of it.
+	videoFromMatrix atomic.Bool
 
 	// Matrix side
 	mxCallID      string
@@ -980,11 +1035,11 @@ func (s *callSession) ringMatrix() error {
 		return err
 	}
 	sdp := s.matrixSnapshot(leg)
-	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallInvite, callEventContent(&event.CallInviteEventContent{
+	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallInvite, withStreamMetadata(callEventContent(&event.CallInviteEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		Lifetime:             int(callInviteLifetime / time.Millisecond),
 		Offer:                event.CallData{SDP: sdp, Type: event.CallDataTypeOffer},
-	}), nil)
+	}), leg), nil)
 	if err == nil {
 		s.log.Info().Msg("Sent m.call.invite")
 	}
@@ -1142,6 +1197,7 @@ func (s *callSession) startRelay() {
 	go relay(metaLeg, mxLeg)
 	go relay(mxLeg, metaLeg)
 	if metaLeg.LocalVideo != nil && mxLeg.LocalVideo != nil {
+		s.videoFromMatrix.Store(true)
 		go s.relayVideo(metaLeg, mxLeg)
 		go s.relayVideo(mxLeg, metaLeg)
 	}
@@ -1391,14 +1447,15 @@ func (s *callSession) answerMatrixOutgoing() {
 	s.lock.Lock()
 	sdp := s.mxLocalSDP
 	s.mxAnswered = true
+	mxLeg := s.mxLeg
 	s.lock.Unlock()
 	if sdp == "" {
 		return
 	}
-	_, err := s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallAnswer, callEventContent(&event.CallAnswerEventContent{
+	_, err := s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallAnswer, withStreamMetadata(callEventContent(&event.CallAnswerEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		Answer:               event.CallData{SDP: sdp, Type: event.CallDataTypeAnswer},
-	}), nil)
+	}), mxLeg), nil)
 	if err != nil {
 		s.log.Err(err).Msg("Failed to send m.call.answer")
 		s.end(endFailed, "")
@@ -1646,6 +1703,8 @@ func (cb *callBridge) handleMatrixEvent(ctx context.Context, portal *bridgev2.Po
 		if ok {
 			go s.onMatrixNegotiate(neg)
 		}
+	case evtStreamMetadataChanged, evtStreamMetadataChangedUnstable:
+		go s.onMatrixStreamMetadata(evt)
 	}
 }
 
@@ -1688,11 +1747,11 @@ func (s *callSession) upgradeMatrixToVideo() {
 		s.log.Err(err).Msg("Failed to renegotiate the Matrix leg for video")
 		return
 	}
-	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallNegotiate, callEventContent(&event.CallNegotiateEventContent{
+	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallNegotiate, withStreamMetadata(callEventContent(&event.CallNegotiateEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		Lifetime:             int(callInviteLifetime / time.Millisecond),
 		Description:          event.CallData{SDP: offer, Type: event.CallDataTypeOffer},
-	}), nil)
+	}), mxLeg), nil)
 	if err != nil {
 		s.log.Err(err).Msg("Failed to send m.call.negotiate offer")
 		return
@@ -1731,18 +1790,102 @@ func (s *callSession) onMatrixNegotiate(neg *event.CallNegotiateEventContent) {
 		s.log.Err(err).Msg("Failed to answer Element's renegotiation")
 		return
 	}
+	elementSendsVideo := callbridge.SendsVideo(neg.Description.SDP)
 	s.log.Info().
-		Bool("element_sends_video", callbridge.SendsVideo(neg.Description.SDP)).
+		Bool("element_sends_video", elementSendsVideo).
 		Bool("bridge_has_video", s.videoCodec != "").
 		Msg("Answering Element's renegotiation")
-	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallNegotiate, callEventContent(&event.CallNegotiateEventContent{
+	_, err = s.ghost.SendMessage(s.ctx, s.portal.MXID, event.CallNegotiate, withStreamMetadata(callEventContent(&event.CallNegotiateEventContent{
 		BaseCallEventContent: s.baseCallContent(),
 		Lifetime:             int(callInviteLifetime / time.Millisecond),
 		Description:          event.CallData{SDP: answer, Type: event.CallDataTypeAnswer},
-	}), nil)
+	}), leg), nil)
 	if err != nil {
 		s.log.Err(err).Msg("Failed to send m.call.negotiate answer")
+		return
 	}
+	if elementSendsVideo {
+		go s.upgradeMetaToVideo()
+	}
+}
+
+// upgradeMetaToVideo follows Element turning its camera on in a voice call: it adds video on the
+// Messenger side (sendMetaVideo, as the web client does when its camera turns on) and relays
+// Element's camera to it. Before, only Element's renegotiation was answered, so its call stayed up
+// but the picture never reached Messenger.
+func (s *callSession) upgradeMetaToVideo() {
+	s.lock.Lock()
+	if s.metaUpgrading {
+		s.lock.Unlock()
+		return
+	}
+	s.metaUpgrading = true
+	mxLeg, metaLeg := s.mxLeg, s.metaLeg
+	s.lock.Unlock()
+	defer func() {
+		s.lock.Lock()
+		s.metaUpgrading = false
+		s.lock.Unlock()
+	}()
+	if mxLeg == nil || metaLeg == nil || s.videoFromMatrix.Load() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
+	tr, err := mxLeg.RemoteVideoTrack(ctx)
+	cancel()
+	if err != nil {
+		s.log.Warn().Err(err).Msg("Element renegotiated video but sent none")
+		return
+	}
+	if metaLeg.LocalVideo == nil {
+		if err = s.sendMetaVideo(tr.Codec().MimeType); err != nil {
+			s.log.Err(err).Msg("Failed to turn on video towards Messenger")
+			return
+		}
+	}
+	if !s.videoFromMatrix.CompareAndSwap(false, true) {
+		return
+	}
+	s.log.Info().Str("video_codec", tr.Codec().MimeType).Msg("Element turned on its camera, relaying it to Messenger")
+	s.relayVideoTrack(tr, mxLeg, metaLeg)
+}
+
+// onMatrixStreamMetadata passes Element's camera and microphone state on to Messenger, as the web
+// client's CLIENT_MEDIA_UPDATE does: without it a camera turned off in Element left Messenger
+// showing its last frame, since Element just stops sending.
+func (s *callSession) onMatrixStreamMetadata(evt *event.Event) {
+	meta := readStreamMetadata(evt)
+	var mine *streamMetadata
+	for _, m := range meta {
+		if m.Purpose == "m.usermedia" {
+			mine = &m
+			break
+		}
+	}
+	if mine == nil {
+		return
+	}
+	s.lock.Lock()
+	leg, cc := s.metaLeg, s.cc
+	s.lock.Unlock()
+	if leg == nil || cc == nil || leg.PC.CurrentLocalDescription() == nil {
+		return
+	}
+	version, err := callbridge.SDPVersion(leg.PC.CurrentLocalDescription().SDP)
+	if err != nil {
+		s.log.Warn().Err(err).Msg("No media version for Element's camera and microphone state")
+		return
+	}
+	tracks := map[string]rtcsignal.TrackInfo{leg.TrackID: {Enabled: !mine.AudioMuted, Label: rtcsignal.TrackLabelAudio}}
+	if leg.LocalVideo != nil {
+		tracks[leg.VideoTrackID] = rtcsignal.TrackInfo{Enabled: !mine.VideoMuted, Label: rtcsignal.TrackLabelVideo}
+	}
+	if _, err = s.cb.sig.Request(s.ctx, cc.NewClientMediaUpdate(version, tracks, "")); err != nil {
+		s.log.Err(err).Msg("Failed to pass Element's camera and microphone state to Messenger")
+		return
+	}
+	s.log.Info().Bool("audio_muted", mine.AudioMuted).Bool("video_muted", mine.VideoMuted).
+		Msg("Passed Element's camera and microphone state to Messenger")
 }
 
 func (s *callSession) onMatrixAnswer(ans *event.CallAnswerEventContent) {

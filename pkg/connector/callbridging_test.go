@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2/callbridge"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
@@ -142,5 +143,38 @@ func TestRecentlyBridgedSuppressesNotices(t *testing.T) {
 	cb.bridged[a] = time.Now().Add(-bridgedNoticeWindow - time.Second)
 	if cb.recentlyBridged(a) {
 		t.Fatal("notice suppression should expire")
+	}
+}
+
+// Element hides the camera button in a voice call unless the other side sends stream metadata, and
+// ignores any stream the metadata does not name - so it has to name the leg's own stream.
+func TestCallEventsCarryStreamMetadata(t *testing.T) {
+	leg := &callbridge.Leg{StreamID: "bridge-stream"}
+	c := withStreamMetadata(callEventContent(&event.CallAnswerEventContent{
+		BaseCallEventContent: event.BaseCallEventContent{CallID: "c", PartyID: "p", Version: "1"},
+	}), leg)
+	for _, key := range []string{streamMetadataKey, streamMetadataKeyUnstable} {
+		meta, ok := c.Raw[key].(map[string]streamMetadata)
+		if !ok {
+			t.Fatalf("%s missing: %#v", key, c.Raw)
+		}
+		got, ok := meta["bridge-stream"]
+		if !ok || got.Purpose != "m.usermedia" || !got.VideoMuted || got.AudioMuted {
+			t.Fatalf("%s = %#v, want the leg's stream as usermedia with video muted", key, meta)
+		}
+	}
+}
+
+// Element's camera and microphone state arrives in m.call.sdp_stream_metadata_changed, under the
+// stable key or MSC3077's.
+func TestReadStreamMetadata(t *testing.T) {
+	for _, key := range []string{streamMetadataKey, streamMetadataKeyUnstable} {
+		evt := &event.Event{Content: event.Content{VeryRaw: json.RawMessage(
+			`{"call_id":"c","` + key + `":{"s1":{"purpose":"m.usermedia","audio_muted":false,"video_muted":true}}}`,
+		)}}
+		meta := readStreamMetadata(evt)
+		if m, ok := meta["s1"]; !ok || !m.VideoMuted || m.AudioMuted || m.Purpose != "m.usermedia" {
+			t.Fatalf("%s: got %#v", key, meta)
+		}
 	}
 }
