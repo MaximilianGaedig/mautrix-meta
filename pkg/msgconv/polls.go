@@ -125,24 +125,28 @@ func PollResponseContent(pollEventID id.EventID, answerIDs []string) (*event.Mes
 	if answerIDs == nil {
 		answerIDs = []string{}
 	}
-	return &event.MessageEventContent{
+	content := &event.MessageEventContent{
 		RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: pollEventID},
-	}, map[string]any{
+	}
+	extra := map[string]any{
 		"org.matrix.msc3381.poll.response": map[string]any{"answers": answerIDs},
 	}
+	return content, extra
 }
 
 // PollEndContent is the content of an org.matrix.msc3381.poll.end event.
 func PollEndContent(pollEventID id.EventID) (*event.MessageEventContent, map[string]any) {
 	const text = "The poll has ended."
-	return &event.MessageEventContent{
+	content := &event.MessageEventContent{
 		MsgType:   event.MsgText,
 		Body:      text,
 		RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: pollEventID},
-	}, map[string]any{
+	}
+	extra := map[string]any{
 		"org.matrix.msc3381.poll.end": map[string]any{},
 		"org.matrix.msc1767.text":     text,
 	}
+	return content, extra
 }
 
 // MatrixPollToTask is the task that creates a poll started on Matrix, and the metadata to save
