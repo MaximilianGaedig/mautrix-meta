@@ -44,7 +44,6 @@ import (
 	waTypes "go.mau.fi/whatsmeow/types"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/rtcsignal"
@@ -515,22 +514,7 @@ func (m *MetaClient) queueCallNotice(n *callNotice) {
 	if n.Sender != 0 {
 		sender = m.makeEventSender(n.Sender)
 	}
-	m.UserLogin.QueueRemoteEvent(&simplevent.Message[*callNotice]{
-		EventMeta: simplevent.EventMeta{
-			Type:      bridgev2.RemoteEventMessage,
-			PortalKey: n.Portal,
-			Sender:    sender,
-			Timestamp: n.Time,
-		},
-		ID:   n.MessageID(),
-		Data: n,
-		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, n *callNotice) (*bridgev2.ConvertedMessage, error) {
-			content, extra := n.Content()
-			return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{
-				Type:    event.EventMessage,
-				Content: content,
-				Extra:   extra,
-			}}}, nil
-		},
-	})
+	for _, evt := range callLogReports(m.callLog, n, sender) {
+		m.UserLogin.QueueRemoteEvent(evt)
+	}
 }

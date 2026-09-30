@@ -48,3 +48,48 @@ func TestForwardedMessengerMessageIsLabelled(t *testing.T) {
 		t.Errorf("an ordinary message must not be labelled: %q", got)
 	}
 }
+
+func TestCallLogAdminText(t *testing.T) {
+	for _, text := range []string{
+		"You missed a video call from Anna.",
+		"You missed an audio call from Anna.",
+		"You missed a group call",
+		"You missed a call from a contact.",
+		"The video call ended.",
+		"The call ended.",
+	} {
+		if !isCallLogAdminText(text) {
+			t.Errorf("%q is a call log text", text)
+		}
+	}
+	for _, text := range []string{
+		"Anna named the group Trip.",
+		"You missed the bus",
+		"Anna changed the theme.",
+		"",
+	} {
+		if isCallLogAdminText(text) {
+			t.Errorf("%q is not a call log text", text)
+		}
+	}
+}
+
+func TestAdminTextAboutACallIsNotBridgedWhenTheCallLogShowsIt(t *testing.T) {
+	msg := &table.WrappedMessage{LSInsertMessage: &table.LSInsertMessage{Text: "You missed a video call from Anna.", IsAdminMessage: true}}
+	cm := (&MessageConverter{CallLogShown: true}).ToMatrix(context.Background(), nil, nil, nil, nil, "mid.x", msg)
+	if len(cm.Parts) != 1 || !cm.Parts[0].DontBridge {
+		t.Fatalf("the call log line says it already: %+v", cm.Parts)
+	}
+	cm = (&MessageConverter{}).ToMatrix(context.Background(), nil, nil, nil, nil, "mid.x", msg)
+	if cm.Parts[0].DontBridge {
+		t.Error("without a call log the admin text is all there is to say about the call")
+	}
+	other := &table.WrappedMessage{LSInsertMessage: &table.LSInsertMessage{Text: "Anna named the group Trip.", IsAdminMessage: true}}
+	if cm := (&MessageConverter{CallLogShown: true}).ToMatrix(context.Background(), nil, nil, nil, nil, "mid.x", other); cm.Parts[0].DontBridge {
+		t.Error("other admin texts stay")
+	}
+	chat := &table.WrappedMessage{LSInsertMessage: &table.LSInsertMessage{Text: "You missed a call from Anna, call me"}}
+	if cm := (&MessageConverter{CallLogShown: true}).ToMatrix(context.Background(), nil, nil, nil, nil, "mid.x", chat); cm.Parts[0].DontBridge {
+		t.Error("a person's message that reads like a call log is still a message")
+	}
+}

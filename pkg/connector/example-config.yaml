@@ -37,9 +37,10 @@ send_presence_on_typing: false
 # Only Facebook and Messenger logins are supported. The bridge reports your own
 # account as idle on this stream, like a Messenger tab in the background.
 presence_bridging: true
-# Post a notice in the chat when a Messenger call starts and ends
-# ("Incoming voice call - answer on Messenger", "Missed voice call", "Call ended (1:14)").
-# Calls themselves are not bridged; answer them in a Messenger app.
+# Show Messenger calls as one line in the chat that follows the call: it appears when the call
+# starts ("Incoming voice call") and is edited into how it went ("Missed voice call",
+# "Voice call, 1:14"). The text Messenger writes about a call in the chat is not bridged
+# when this is on. Calls themselves are not bridged by this; answer them in a Messenger app.
 call_notices: true
 # Experimental: bridge 1:1 Messenger voice calls to Matrix legacy VoIP (m.call.*).
 # Incoming calls ring the Matrix room (from the caller's ghost); answering in

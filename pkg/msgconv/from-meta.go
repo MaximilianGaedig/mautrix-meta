@@ -258,7 +258,8 @@ func (mc *MessageConverter) ToMatrix(
 			// Joins, leaves, renames, new photos and pins are also bridged as room state, which
 			// Matrix clients render; the connector marks the admin text that came with one.
 			// The same goes for the admin text that announces a poll, which the poll shows.
-			DontBridge: msg.IsAdminMessage && (msg.AdminTextShownByState || hasPoll),
+			// The text about a call is the call log line's job when the bridge keeps one.
+			DontBridge: msg.IsAdminMessage && (msg.AdminTextShownByState || hasPoll || (mc.CallLogShown && isCallLogAdminText(msg.Text))),
 		})
 	}
 	if len(cm.Parts) == 0 {

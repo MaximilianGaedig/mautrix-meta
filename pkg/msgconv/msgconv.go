@@ -37,6 +37,9 @@ type MessageConverter struct {
 	HTMLParser      *textfmt.MatrixHTMLParser
 	DB              *metadb.MetaDB
 	DirectMedia     bool
+	// CallLogShown says that calls have a line of their own in chats (a call log), so that the text Messenger
+	// writes about a call is not bridged as well.
+	CallLogShown bool
 
 	// RecentMessages lists the latest messages of a chat. It defaults to the bridge database and is a field so
 	// that tests can supply messages.

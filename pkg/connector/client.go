@@ -21,6 +21,7 @@ import (
 	waTypes "go.mau.fi/whatsmeow/types"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/calllog"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
 
@@ -60,6 +61,7 @@ type MetaClient struct {
 	lastError24Reconnect  time.Time
 	connectWaiter         *exsync.Event
 	calls                 *callTracker
+	callLog               *calllog.Log
 	callBridge            atomic.Pointer[callBridge]
 	e2eeConnectWaiter     *exsync.Event
 	firstE2EEConnectDone  bool
@@ -108,7 +110,8 @@ func (m *MetaConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserL
 		connectWaiter:     exsync.NewEvent(),
 		e2eeConnectWaiter: exsync.NewEvent(),
 
-		calls: newCallTracker(metaid.ParseUserLoginID(login.ID)),
+		calls:   newCallTracker(metaid.ParseUserLoginID(login.ID)),
+		callLog: calllog.New(),
 	}
 	c.editChannels = exsync.NewMap[string, chan *FBEditEvent]()
 	login.Client = c
