@@ -648,7 +648,11 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		offersVideo := callbridge.SendsVideo(sd.SDP)
 		answer, err := leg.AnswerRenegotiation(metacall.PrepareRemoteSDP(sd.SDP))
 		if err == nil {
-			answer, err = metacall.PrepareLocalSDP(answer, s.m.callIdentity(), s.videoCodec != "" || offersVideo)
+			// Only say we send video when there is video of ours to send. Answering sendrecv because
+			// the offer had video made the iPhone wait for a picture that never came - a spinner where
+			// the Matrix user's camera-off avatar belongs. When their camera does come on,
+			// sendMetaVideo adds the track and renegotiates.
+			answer, err = metacall.PrepareLocalSDP(answer, s.m.callIdentity(), leg.LocalVideo != nil)
 		}
 		if err != nil {
 			callbridge.LogSDPShape(s.log.Err(err), sd.SDP).Bool("leg_plan_b", leg.IsPlanB()).
