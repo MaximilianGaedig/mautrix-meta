@@ -518,6 +518,14 @@ type LSDeleteLiveLocationSharer struct {
 	Unrecognized map[int]any `json:",omitempty"`
 }
 
+func (ls *LSUpsertLiveLocationSharer) GetThreadKey() int64 {
+	return ls.ThreadKey
+}
+
+func (ls *LSDeleteLiveLocationSharer) GetThreadKey() int64 {
+	return ls.ThreadKey
+}
+
 type LSUpdateSharedAlbumOnMessageRecall struct {
 	ThreadKey int64  `index:"0" json:",omitempty"`
 	MessageId string `index:"1" json:",omitempty"`

@@ -397,6 +397,8 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 	collectPortalEvents(params, tbl.LSUpsertReaction, m.handleUpsertReaction, &innerQueue)
 	collectPortalEvents(params, tbl.LSDeleteReaction, m.handleDeleteReaction, &innerQueue)
 	collectPortalEvents(params, tbl.LSRemoveParticipantFromThread, m.handleRemoveParticipant, &innerQueue)
+	collectPortalEvents(params, tbl.LSUpsertLiveLocationSharer, m.handleLiveLocationUpsert, &innerQueue)
+	collectPortalEvents(params, tbl.LSDeleteLiveLocationSharer, m.handleLiveLocationDelete, &innerQueue)
 	collectPortalEvents(params, tbl.LSUpdateThreadParticipantAdminStatus, m.handleAdminStatus, &innerQueue)
 	collectPortalEvents(params, pinsByThread(tbl), m.handlePins, &innerQueue)
 	m.handleTableCalls(ctx, tbl, params.portalKeyFor)
