@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -45,11 +46,22 @@ func main() {
 	raw := flag.Bool("raw", false, "also print each publish exactly as Messenger sent it")
 	duration := flag.Duration("for", 60*time.Second, "how long to listen")
 	verbose := flag.Bool("v", false, "log the connection")
+	limit := flag.Int("max", messagix.MaxPresenceContacts, "most ids to ask about in one request")
 	flag.Parse()
+	messagix.MaxPresenceContacts = *limit
 
 	var ids []int64
 	wanted := map[int64]bool{}
-	for _, arg := range flag.Args() {
+	args := flag.Args()
+	if len(args) == 1 && args[0] == "-" {
+		// Ids on a file descriptor 3, one per line, for more than a command line holds.
+		data, err := io.ReadAll(os.NewFile(3, "ids"))
+		if err != nil {
+			fail("reading ids from fd 3: %v", err)
+		}
+		args = strings.Fields(string(data))
+	}
+	for _, arg := range args {
 		id, err := strconv.ParseInt(arg, 10, 64)
 		if err != nil {
 			fail("not a Messenger id: %s", arg)

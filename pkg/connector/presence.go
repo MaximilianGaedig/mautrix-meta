@@ -26,6 +26,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix"
@@ -41,7 +42,11 @@ const LastSeenPrefix = "last seen "
 
 // maxPresenceThreads is how many recent 1:1 chats have their other
 // participant subscribed as an additional presence contact.
-const maxPresenceThreads = messagix.MaxPresenceContacts
+const maxPresenceThreads = 200
+
+// maxPresenceMembers caps how many group members are asked about with
+// presence_group_members. Messenger accepted 1038 in one request.
+const maxPresenceMembers = 5000
 
 // mapMetaPresence converts a Meta contact status to Matrix presence: active
 // contacts are online, everyone else is offline with the exact last active
@@ -158,19 +163,50 @@ func (pt *presenceTracker) closeAll() map[int64]presence.State {
 	return out
 }
 
-// presenceContacts remembers the other participant of recent 1:1 chats.
+// presenceContacts remembers whose presence to ask for beyond Messenger's own
+// buddy list: the other participant of recent 1:1 chats (what Messenger web
+// asks for), and with presence_group_members everyone in the groups too.
 type presenceContacts struct {
 	lock    sync.Mutex
 	threads map[int64]int64 // other user ID -> last activity ms
+	members map[int64]int64 // group member ID -> their last read ms; nil unless asked for
 	sent    []int64
 }
 
-// add records 1:1 threads from a table and returns the new contact list if
-// it changed.
+// includeMembers makes group members part of the list from now on.
+func (pc *presenceContacts) includeMembers() {
+	pc.lock.Lock()
+	defer pc.lock.Unlock()
+	if pc.members == nil {
+		pc.members = make(map[int64]int64)
+	}
+}
+
+// addMembers records group members, keeping the latest time seen for each,
+// and returns the new contact list if it changed. Without includeMembers it
+// does nothing.
+func (pc *presenceContacts) addMembers(members map[int64]int64, self int64) ([]int64, bool) {
+	pc.lock.Lock()
+	defer pc.lock.Unlock()
+	if pc.members == nil {
+		return nil, false
+	}
+	for id, at := range members {
+		if id <= 0 || id == self {
+			continue
+		}
+		if old, ok := pc.members[id]; !ok || old < at {
+			pc.members[id] = at
+		}
+	}
+	return pc.changedLocked()
+}
+
+// add records 1:1 threads, and group members when they are asked for, from a
+// table and returns the new contact list if it changed.
 func (pc *presenceContacts) add(tbl *table.LSTable, self int64) ([]int64, bool) {
 	pc.lock.Lock()
 	defer pc.lock.Unlock()
-	changed := false
 	for _, thread := range tbl.LSDeleteThenInsertThread {
 		tt := thread.ThreadType
 		if !tt.IsOneToOne() || tt.IsWhatsApp() || thread.ThreadKey <= 0 || thread.ThreadKey == self {
@@ -181,19 +217,28 @@ func (pc *presenceContacts) add(tbl *table.LSTable, self int64) ([]int64, bool) 
 		}
 		if old, ok := pc.threads[thread.ThreadKey]; !ok || old < thread.LastActivityTimestampMs {
 			pc.threads[thread.ThreadKey] = thread.LastActivityTimestampMs
-			changed = true
 		}
 	}
-	if !changed {
-		return nil, false
-	}
-	ids := pc.sortedLocked()
-	if len(ids) > maxPresenceThreads {
-		for _, id := range ids[maxPresenceThreads:] {
+	if len(pc.threads) > maxPresenceThreads {
+		for _, id := range sortByRecency(pc.threads)[maxPresenceThreads:] {
 			delete(pc.threads, id)
 		}
-		ids = ids[:maxPresenceThreads]
 	}
+	if pc.members != nil {
+		for _, member := range tbl.LSAddParticipantIdToGroupThread {
+			if member.ContactId <= 0 || member.ContactId == self {
+				continue
+			}
+			if old, ok := pc.members[member.ContactId]; !ok || old < member.ReadActionTimestampMs {
+				pc.members[member.ContactId] = member.ReadActionTimestampMs
+			}
+		}
+	}
+	return pc.changedLocked()
+}
+
+func (pc *presenceContacts) changedLocked() ([]int64, bool) {
+	ids := pc.sortedLocked()
 	set := slices.Sorted(slices.Values(ids))
 	if slices.Equal(set, pc.sent) {
 		return nil, false
@@ -202,7 +247,8 @@ func (pc *presenceContacts) add(tbl *table.LSTable, self int64) ([]int64, bool) 
 	return ids, true
 }
 
-// current returns the contact list, most recently active chat first.
+// current returns the contact list: 1:1 partners, most recently active chat
+// first, then group members, most recently active first.
 func (pc *presenceContacts) current() []int64 {
 	pc.lock.Lock()
 	defer pc.lock.Unlock()
@@ -210,12 +256,29 @@ func (pc *presenceContacts) current() []int64 {
 }
 
 func (pc *presenceContacts) sortedLocked() []int64 {
-	ids := make([]int64, 0, len(pc.threads))
-	for id := range pc.threads {
+	ids := sortByRecency(pc.threads)
+	if pc.members == nil {
+		return ids
+	}
+	for _, id := range sortByRecency(pc.members) {
+		if _, partner := pc.threads[id]; partner {
+			continue
+		}
+		if len(ids) >= maxPresenceThreads+maxPresenceMembers {
+			break
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func sortByRecency(times map[int64]int64) []int64 {
+	ids := make([]int64, 0, len(times))
+	for id := range times {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool {
-		ai, aj := pc.threads[ids[i]], pc.threads[ids[j]]
+		ai, aj := times[ids[i]], times[ids[j]]
 		if ai != aj {
 			return ai > aj
 		}
@@ -227,6 +290,9 @@ func (pc *presenceContacts) sortedLocked() []int64 {
 func (m *MetaConnector) startPresence(ctx context.Context) {
 	if !m.Config.PresenceBridging {
 		return
+	}
+	if m.Config.PresenceGroupMembers {
+		messagix.MaxPresenceContacts = maxPresenceThreads + maxPresenceMembers
 	}
 	m.presence = presence.NewManager(presence.Config{
 		// Meta's status flips are coarse already; forward them quickly.
@@ -254,12 +320,55 @@ func (m *MetaClient) startPresenceStream(ctx context.Context) {
 	if !m.presenceEnabled() || m.Client == nil {
 		return
 	}
+	if m.Main.Config.PresenceGroupMembers {
+		m.presenceContacts.includeMembers()
+		go m.addGroupMembersToPresence(ctx)
+	}
 	m.Client.SetPresenceContacts(m.presenceContacts.current())
 	err := m.Client.StartPresenceStream(ctx)
 	if errors.Is(err, messagix.ErrPresenceUnsupported) {
 		zerolog.Ctx(ctx).Debug().Msg("Presence stream not supported on this platform")
 	} else if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to start presence stream")
+	}
+}
+
+// addGroupMembersToPresence asks for the presence of everyone in the groups this login's chats are,
+// as the room members show them: the chats' own participant lists only arrive for chats Messenger
+// syncs, which leaves out every group that has been quiet.
+func (m *MetaClient) addGroupMembersToPresence(ctx context.Context) {
+	log := zerolog.Ctx(ctx).With().Str("action", "presence group members").Logger()
+	portals, err := m.Main.Bridge.DB.UserPortal.GetAllForLogin(ctx, m.UserLogin.UserLogin)
+	if err != nil {
+		log.Err(err).Msg("Failed to list chats for group member presence")
+		return
+	}
+	members := make(map[int64]int64)
+	groups := 0
+	for _, up := range portals {
+		portal, err := m.Main.Bridge.GetExistingPortalByKey(ctx, up.Portal)
+		if err != nil || portal == nil || portal.MXID == "" || portal.RoomType == database.RoomTypeDM {
+			continue
+		}
+		joined, err := m.Main.Bridge.Matrix.GetMembers(ctx, portal.MXID)
+		if err != nil {
+			log.Warn().Err(err).Stringer("room_id", portal.MXID).Msg("Failed to get members for presence")
+			continue
+		}
+		groups++
+		for userID, member := range joined {
+			if member == nil || member.Membership != event.MembershipJoin {
+				continue
+			}
+			if ghost, ok := m.Main.Bridge.Matrix.ParseGhostMXID(userID); ok {
+				members[metaid.ParseUserID(ghost)] = 0
+			}
+		}
+	}
+	ids, changed := m.presenceContacts.addMembers(members, m.selfFBID())
+	log.Info().Int("groups", groups).Int("members", len(members)).Msg("Asking for the presence of group members")
+	if changed && m.Client != nil {
+		m.Client.SetPresenceContacts(ids)
 	}
 }
 

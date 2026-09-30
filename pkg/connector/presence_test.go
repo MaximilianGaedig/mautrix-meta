@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -114,5 +115,40 @@ func TestPresenceContacts(t *testing.T) {
 	}
 	if cur := pc.current(); len(cur) != 2 || cur[0] != 10 {
 		t.Errorf("current: %v", cur)
+	}
+}
+
+// Messenger answers for anyone named in the request, but the bridge only named 1:1 partners, so
+// group members showed as offline forever unless they were friends.
+func TestPresenceContactsGroupMembers(t *testing.T) {
+	tbl := &table.LSTable{
+		LSDeleteThenInsertThread: []*table.LSDeleteThenInsertThread{
+			{ThreadKey: 10, ThreadType: table.ONE_TO_ONE, LastActivityTimestampMs: 100},
+		},
+		LSAddParticipantIdToGroupThread: []*table.LSAddParticipantIdToGroupThread{
+			{ThreadKey: 500, ContactId: 20, ReadActionTimestampMs: 50},
+			{ThreadKey: 500, ContactId: 21, ReadActionTimestampMs: 900},
+			{ThreadKey: 500, ContactId: 10, ReadActionTimestampMs: 999},
+			{ThreadKey: 500, ContactId: 99},
+		},
+	}
+
+	var off presenceContacts
+	if ids, _ := off.add(tbl, 99); !slices.Equal(ids, []int64{10}) {
+		t.Errorf("without the option only 1:1 partners are asked for, got %v", ids)
+	}
+
+	var on presenceContacts
+	on.includeMembers()
+	ids, changed := on.add(tbl, 99)
+	// 1:1 partners first, then members by their latest read; nobody twice, never ourselves.
+	if !changed || !slices.Equal(ids, []int64{10, 21, 20}) {
+		t.Fatalf("got %v %v", ids, changed)
+	}
+
+	// Members of quiet groups, found from the rooms, join the list.
+	ids, changed = on.addMembers(map[int64]int64{30: 0, 20: 0, 99: 0}, 99)
+	if !changed || !slices.Equal(ids, []int64{10, 21, 20, 30}) {
+		t.Fatalf("after room members: %v %v", ids, changed)
 	}
 }

@@ -52,8 +52,9 @@ type PresenceStreamClosedEvent struct {
 	Err error
 }
 
-// MaxPresenceContacts caps the number of additional contacts requested.
-const MaxPresenceContacts = 200
+// MaxPresenceContacts caps the number of additional contacts requested. The
+// connector raises it when asked to cover group members too.
+var MaxPresenceContacts = 200
 
 const (
 	presenceAmendMinInterval = 10 * time.Second
