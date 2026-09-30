@@ -15,7 +15,7 @@ import (
 
 var _ bridgev2.TagHandlingNetworkAPI = (*MetaClient)(nil)
 
-var errUnarchiveUnsupported = errors.New("Messenger has no way to take a chat out of the archive from Matrix, a message or the Messenger app does")
+var errUnarchiveUnsupported = errors.New("there is no way on Messenger to take a chat out of the archive from Matrix: a message or the Messenger app does")
 
 // archiveUserLocal is the tag a chat gets from the folder Messenger keeps it in: the archive tag for archived
 // chats, and nothing for the others, so that tags of other kinds are left alone. Without an archive tag

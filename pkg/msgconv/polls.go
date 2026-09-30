@@ -126,23 +126,23 @@ func PollResponseContent(pollEventID id.EventID, answerIDs []string) (*event.Mes
 		answerIDs = []string{}
 	}
 	return &event.MessageEventContent{
-			RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: pollEventID},
-		}, map[string]any{
-			"org.matrix.msc3381.poll.response": map[string]any{"answers": answerIDs},
-		}
+		RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: pollEventID},
+	}, map[string]any{
+		"org.matrix.msc3381.poll.response": map[string]any{"answers": answerIDs},
+	}
 }
 
 // PollEndContent is the content of an org.matrix.msc3381.poll.end event.
 func PollEndContent(pollEventID id.EventID) (*event.MessageEventContent, map[string]any) {
 	const text = "The poll has ended."
 	return &event.MessageEventContent{
-			MsgType:   event.MsgText,
-			Body:      text,
-			RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: pollEventID},
-		}, map[string]any{
-			"org.matrix.msc3381.poll.end": map[string]any{},
-			"org.matrix.msc1767.text":     text,
-		}
+		MsgType:   event.MsgText,
+		Body:      text,
+		RelatesTo: &event.RelatesTo{Type: event.RelReference, EventID: pollEventID},
+	}, map[string]any{
+		"org.matrix.msc3381.poll.end": map[string]any{},
+		"org.matrix.msc1767.text":     text,
+	}
 }
 
 // MatrixPollToTask is the task that creates a poll started on Matrix, and the metadata to save
@@ -154,7 +154,7 @@ func MatrixPollToTask(threadKey int64, content *event.PollStartEventContent) (*s
 	if question == "" {
 		return nil, nil, errors.New("the poll has no question")
 	} else if len(start.Answers) < minPollOptions {
-		return nil, nil, fmt.Errorf("Messenger polls need at least %d options", minPollOptions)
+		return nil, nil, fmt.Errorf("polls on Messenger need at least %d options", minPollOptions)
 	}
 	meta := &metaid.PollMetadata{StartedOnMatrix: true, Frozen: true}
 	texts := make([]string, len(start.Answers))
@@ -192,7 +192,7 @@ func MatrixVoteToTask(threadKey int64, meta *metaid.PollMetadata, answers []stri
 		if !ok {
 			return nil, nil, fmt.Errorf("unknown poll answer %q", answerID)
 		} else if opt.OptionID == 0 {
-			return nil, nil, fmt.Errorf("Messenger hasn't told us the ID of the option %q yet, try again in a moment", opt.Text)
+			return nil, nil, fmt.Errorf("no ID from Messenger yet for the option %q, try again in a moment", opt.Text)
 		}
 		if !slices.Contains(selected, opt.OptionID) {
 			selected = append(selected, opt.OptionID)
