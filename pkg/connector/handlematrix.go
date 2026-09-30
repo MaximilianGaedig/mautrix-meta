@@ -664,16 +664,7 @@ func (t *MetaClient) HandleMatrixDeleteChat(ctx context.Context, chat *bridgev2.
 		Bool("is_whatsapp_e2ee", portalMeta.ThreadType.IsWhatsApp()).
 		Msg("Deleting chat")
 
-	syncGroup := int64(1)
-	if portalMeta.ThreadType.IsWhatsApp() && portalMeta.FBThreadKey != 0 {
-		threadID = portalMeta.FBThreadKey
-		syncGroup = 95
-	}
-	_, err := t.Client.ExecuteTasks(ctx, &socket.DeleteThreadTask{
-		ThreadKey:  threadID,
-		RemoveType: 0,
-		SyncGroup:  syncGroup,
-	})
+	_, err := t.Client.ExecuteTasks(ctx, t.threadRemoveTask(chat.Portal, socket.RemoveTypeDelete))
 	return err
 }
 

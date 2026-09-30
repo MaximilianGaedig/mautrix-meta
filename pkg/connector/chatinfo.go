@@ -245,6 +245,7 @@ func (m *MetaClient) wrapChatInfo(tbl table.ThreadInfo) *bridgev2.ChatInfo {
 		chatInfo.UserLocal = &bridgev2.UserLocalPortalInfo{}
 	}
 	chatInfo.MessageRequest = ptr.Ptr(tbl.GetFolderName() == folderPending)
+	m.applyArchive(chatInfo, tbl.GetFolderName())
 	if tbl.GetFolderName() == folderE2EECutover {
 		chatInfo.ExtraUpdates = bridgev2.MergeExtraUpdaters(chatInfo.ExtraUpdates, markPortalAsEncrypted)
 	}

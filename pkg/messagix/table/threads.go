@@ -238,6 +238,10 @@ type LSMoveThreadToInboxAndUpdateParent struct {
 	Unrecognized map[int]any `json:",omitempty"`
 }
 
+func (ls *LSMoveThreadToInboxAndUpdateParent) GetThreadKey() int64 {
+	return ls.ThreadKey
+}
+
 type LSUpdateThreadSnippet struct {
 	ThreadKey              int64  `index:"0" json:",omitempty"`
 	Snippet                string `index:"1" json:",omitempty"`
@@ -650,6 +654,10 @@ type LSMoveThreadToArchivedFolder struct {
 	ThreadKey int64 `index:"0" json:",omitempty"`
 
 	Unrecognized map[int]any `json:",omitempty"`
+}
+
+func (ls *LSMoveThreadToArchivedFolder) GetThreadKey() int64 {
+	return ls.ThreadKey
 }
 
 type LSMoveThreadToE2EECutoverFolder struct {

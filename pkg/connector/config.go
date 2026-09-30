@@ -8,6 +8,7 @@ import (
 
 	up "go.mau.fi/util/configupgrade"
 	"gopkg.in/yaml.v3"
+	"maunium.net/go/mautrix/event"
 )
 
 //go:embed example-config.yaml
@@ -30,14 +31,17 @@ type Config struct {
 	displaynameTemplate *template.Template `yaml:"-"`
 
 	// Only affects E2EE chats right now.
-	SendPresenceOnTyping      bool `yaml:"send_presence_on_typing"`
-	PresenceBridging          bool `yaml:"presence_bridging"`
-	CallNotices               bool `yaml:"call_notices"`
-	CallBridging              bool `yaml:"call_bridging"`
-	CallBridgingMatrixRTC     bool `yaml:"call_bridging_matrixrtc"`
-	DisableViewOnce           bool `yaml:"disable_view_once"`
-	MarketplaceSpace          bool `yaml:"marketplace_space"`
-	LogRedactedLoginResponses bool `yaml:"log_redacted_login_responses"`
+	SendPresenceOnTyping  bool `yaml:"send_presence_on_typing"`
+	PresenceBridging      bool `yaml:"presence_bridging"`
+	CallNotices           bool `yaml:"call_notices"`
+	CallBridging          bool `yaml:"call_bridging"`
+	CallBridgingMatrixRTC bool `yaml:"call_bridging_matrixrtc"`
+	DisableViewOnce       bool `yaml:"disable_view_once"`
+	// ArchiveTag is the room tag that archived Messenger chats get, and that archives them when it is added in
+	// Matrix. Empty leaves archiving out of the bridge.
+	ArchiveTag                event.RoomTag `yaml:"archive_tag"`
+	MarketplaceSpace          bool          `yaml:"marketplace_space"`
+	LogRedactedLoginResponses bool          `yaml:"log_redacted_login_responses"`
 
 	ThreadBackfill ThreadBackfillConfig `yaml:"thread_backfill"`
 
@@ -88,6 +92,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "call_bridging_matrixrtc")
 	helper.Copy(up.Str|up.Null, "call_bridging_frame_encryption_module")
 	helper.Copy(up.Bool, "disable_view_once")
+	helper.Copy(up.Str|up.Null, "archive_tag")
 	helper.Copy(up.Bool, "marketplace_space")
 	helper.Copy(up.Bool, "log_redacted_login_responses")
 	helper.Copy(up.Int, "thread_backfill", "batch_count")

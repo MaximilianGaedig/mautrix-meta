@@ -373,6 +373,8 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 	collectPortalEvents(params, tbl.LSAddParticipantIdToGroupThread, m.handleAddParticipant, &innerQueue)
 	collectPortalEvents(params, tbl.LSUpdateThreadMuteSetting, m.handleUpdateMuteSetting, &innerQueue)
 	collectPortalEvents(params, tbl.LSMoveThreadToE2EECutoverFolder, m.handleMoveThreadToE2EE, &innerQueue)
+	collectPortalEvents(params, tbl.LSMoveThreadToArchivedFolder, m.handleMoveThreadToArchived, &innerQueue)
+	collectPortalEvents(params, tbl.LSMoveThreadToInboxAndUpdateParent, m.handleMoveThreadToInbox, &innerQueue)
 	upsert, insert := tbl.WrapMessages()
 	collectPortalEvents(params, maps.Values(upsert), m.handleUpsertMessages, &innerQueue)
 	collectPortalEvents(params, tbl.LSUpdateExistingMessageRange, m.handleUpdateExistingMessageRange, &innerQueue)

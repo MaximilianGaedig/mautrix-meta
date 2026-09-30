@@ -114,6 +114,7 @@ func (evt *VerifyThreadExistsEvent) GetChatInfo(ctx context.Context, portal *bri
 	}
 	chatInfo := evt.m.makeMinimalChatInfo(evt.ThreadKey, evt.ThreadType, evt.ParentThreadKey)
 	chatInfo.MessageRequest = ptr.Ptr(evt.FolderName == folderPending)
+	evt.m.applyArchive(chatInfo, evt.FolderName)
 	return chatInfo, nil
 }
 

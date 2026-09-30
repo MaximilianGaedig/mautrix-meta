@@ -366,6 +366,14 @@ func (t *AcceptMessageRequestTask) Create() (any, string) {
 	return t, "message_request"
 }
 
+// The remove types of DeleteThreadTask, as the web client's LSThreadRemoveType has them. Archiving a chat is the
+// same task as deleting it.
+const (
+	RemoveTypeDelete  int64 = 0
+	RemoveTypeArchive int64 = 1
+	RemoveTypeIgnore  int64 = 2
+)
+
 type DeleteThreadTask struct {
 	ThreadKey  int64 `json:"thread_key"`
 	RemoveType int64 `json:"remove_type"`
