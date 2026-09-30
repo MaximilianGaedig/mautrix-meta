@@ -396,6 +396,7 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 	collectPortalEvents(params, tbl.LSUpsertReaction, m.handleUpsertReaction, &innerQueue)
 	collectPortalEvents(params, tbl.LSDeleteReaction, m.handleDeleteReaction, &innerQueue)
 	collectPortalEvents(params, tbl.LSRemoveParticipantFromThread, m.handleRemoveParticipant, &innerQueue)
+	collectPortalEvents(params, pinsByThread(tbl), m.handlePins, &innerQueue)
 	m.handleTableCalls(ctx, tbl, params.portalKeyFor)
 	// TODO request more inbox if applicable
 

@@ -11,6 +11,7 @@ var TaskLabels = map[string]string{
 	"AddParticipantsTask":          "23",
 	"UpdateAdminTask":              "25",
 	"SendReactionTask":             "29",
+	"SetPinnedMessageTask":         "751",
 	"SearchUserTask":               "30",
 	"SearchUserSecondaryTask":      "31",
 	"RenameThreadTask":             "32",

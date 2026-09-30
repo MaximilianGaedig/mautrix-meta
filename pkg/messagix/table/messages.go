@@ -198,7 +198,16 @@ type LSSetPinnedMessage struct {
 	ThreadKey         int64  `index:"0" json:",omitempty"`
 	MessageId         string `index:"1" json:",omitempty"`
 	PinnedTimestampMs int64  `index:"2" json:",omitempty"`
-	AuthorityLevel    int64  `index:"3" json:",omitempty"`
+	// 1 pins the message, anything else unpins it.
+	PinnedMessageState int64 `index:"3" json:",omitempty"`
+}
+
+func (ls *LSSetPinnedMessage) GetThreadKey() int64 {
+	return ls.ThreadKey
+}
+
+func (ls *LSClearPinnedMessages) GetThreadKey() int64 {
+	return ls.ThreadKey
 }
 
 type LSSetForwardScore struct {

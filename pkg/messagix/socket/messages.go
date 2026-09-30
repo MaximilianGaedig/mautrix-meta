@@ -31,6 +31,21 @@ func (t *SendReactionTask) Create() (any, string) {
 	return t, string(queueName)
 }
 
+type SetPinnedMessageTask struct {
+	ThreadKey int64  `json:"thread_key"`
+	MessageID string `json:"message_id"`
+	// 1 to pin, 0 to unpin.
+	PinnedMessageState int `json:"pinned_message_state"`
+}
+
+func (t *SetPinnedMessageTask) GetLabel() string {
+	return TaskLabels["SetPinnedMessageTask"]
+}
+
+func (t *SetPinnedMessageTask) Create() (any, string) {
+	return t, "set_pinned_message_search"
+}
+
 type DeleteMessageTask struct {
 	MessageId string `json:"message_id"`
 }
