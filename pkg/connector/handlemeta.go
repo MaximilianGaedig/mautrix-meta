@@ -293,6 +293,7 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 		activeThreads: activeThreads,
 		waThreadMap:   waThreadMap,
 	}
+	params.stateChanged = threadsWithStateChanges(tbl, params.MapWhatsAppThreadKey)
 
 	for _, thread := range tbl.LSVerifyThreadExists {
 		threadExists[thread.ThreadKey] = thread
@@ -748,6 +749,7 @@ func (m *MetaClient) handleSubthread(ctx context.Context, msg *table.WrappedMess
 func (m *MetaClient) handleMessageInsert(tk handlerParams, msg *table.WrappedMessage) bridgev2.RemoteEvent {
 	m.handleSubthread(tk.ctx, msg)
 	msg.ThreadID = tk.ThreadMsgID
+	msg.AdminTextShownByState = msg.IsAdminMessage && tk.stateChanged.Has(tk.ID)
 	return &FBMessageEvent{
 		WrappedMessage:    msg,
 		portalKey:         tk.Portal,
@@ -793,6 +795,8 @@ type threadMaps struct {
 	syncs         map[int64]*FBChatResync
 	activeThreads exmaps.Set[int64]
 	waThreadMap   map[int64]int64
+	// Threads whose admin text this batch also carries as room state (threadsWithStateChanges).
+	stateChanged exmaps.Set[int64]
 }
 
 func (tm threadMaps) MapWhatsAppThreadKey(fbKey int64) int64 {
@@ -832,6 +836,7 @@ type handlerParams struct {
 	vtes          map[int64]*table.LSVerifyThreadExists
 	syncs         map[int64]*FBChatResync
 	activeThreads exmaps.Set[int64]
+	stateChanged  exmaps.Set[int64]
 }
 
 func (tk handlerParams) IsUncertainReceiver() bool {
@@ -882,9 +887,34 @@ func collectPortalEvents[T ThreadKeyable](
 			vtes:          p.vtes,
 			syncs:         p.syncs,
 			activeThreads: p.activeThreads,
+			stateChanged:  p.stateChanged,
 		}, msg)
 		if evt != nil {
 			*innerQueue = append(*innerQueue, evt)
 		}
 	}
+}
+
+// threadsWithStateChanges lists the threads whose membership, name, photo or pins change in this
+// batch. Meta sends the admin text for such a change ("Anna added Ben") in the same batch as the
+// change itself, and the change is bridged as room state that Matrix clients already render.
+func threadsWithStateChanges(tbl *table.LSTable, mapKey func(int64) int64) exmaps.Set[int64] {
+	set := make(exmaps.Set[int64])
+	add := func(threadKey int64) { set.Add(mapKey(threadKey)) }
+	for _, row := range tbl.LSAddParticipantIdToGroupThread {
+		add(row.ThreadKey)
+	}
+	for _, row := range tbl.LSRemoveParticipantFromThread {
+		add(row.ThreadKey)
+	}
+	for _, row := range tbl.LSSyncUpdateThreadName {
+		add(row.ThreadKey)
+	}
+	for _, row := range tbl.LSSetThreadImageURL {
+		add(row.ThreadKey)
+	}
+	for _, row := range tbl.LSSetPinnedMessage {
+		add(row.ThreadKey)
+	}
+	return set
 }

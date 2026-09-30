@@ -69,3 +69,30 @@ func TestSetPinnedMessageTask(t *testing.T) {
 		t.Errorf("unpin payload = %s", unpin)
 	}
 }
+
+func TestThreadsWithStateChanges(t *testing.T) {
+	identity := func(k int64) int64 { return k }
+	got := threadsWithStateChanges(&table.LSTable{
+		LSAddParticipantIdToGroupThread: []*table.LSAddParticipantIdToGroupThread{{ThreadKey: 1}},
+		LSRemoveParticipantFromThread:   []*table.LSRemoveParticipantFromThread{{ThreadKey: 2}},
+		LSSyncUpdateThreadName:          []*table.LSSyncUpdateThreadName{{ThreadKey: 3}},
+		LSSetThreadImageURL:             []*table.LSSetThreadImageURL{{ThreadKey: 4}},
+		LSSetPinnedMessage:              []*table.LSSetPinnedMessage{{ThreadKey: 5}},
+	}, identity)
+	for k := int64(1); k <= 5; k++ {
+		if !got.Has(k) {
+			t.Errorf("thread %d changed state", k)
+		}
+	}
+	// A theme or nickname change has no room state: its admin text is all there is.
+	if got.Has(6) || len(threadsWithStateChanges(&table.LSTable{LSUpdateThreadTheme: []*table.LSUpdateThreadTheme{{}}}, identity)) != 0 {
+		t.Error("no state change, no thread")
+	}
+	// Encrypted threads are keyed by their WhatsApp thread key.
+	mapped := threadsWithStateChanges(&table.LSTable{
+		LSSyncUpdateThreadName: []*table.LSSyncUpdateThreadName{{ThreadKey: 10}},
+	}, func(k int64) int64 { return k + 100 })
+	if !mapped.Has(110) {
+		t.Errorf("thread key not mapped: %v", mapped)
+	}
+}

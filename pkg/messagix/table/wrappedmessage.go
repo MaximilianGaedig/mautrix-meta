@@ -157,6 +157,9 @@ type WrappedMessage struct {
 
 	ThreadID         string
 	IsSubthreadStart bool
+	// An admin message ("Anna named the group") whose change arrived in the same batch as a state
+	// change Matrix clients render themselves, so bridging the text would say it twice.
+	AdminTextShownByState bool
 }
 
 type WrappedXMA struct {
