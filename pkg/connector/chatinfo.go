@@ -260,14 +260,21 @@ func (m *MetaClient) wrapChatInfo(tbl table.ThreadInfo) *bridgev2.ChatInfo {
 	return chatInfo
 }
 
+// Messenger's roles as power levels.
+const (
+	fbPowerSuperAdmin = 95
+	fbPowerAdmin      = 75
+	fbPowerModerator  = 50
+)
+
 func (m *MetaClient) wrapChatMember(tbl *table.LSAddParticipantIdToGroupThread) bridgev2.ChatMember {
 	var power int
 	if tbl.IsSuperAdmin {
-		power = 95
+		power = fbPowerSuperAdmin
 	} else if tbl.IsAdmin {
-		power = 75
+		power = fbPowerAdmin
 	} else if tbl.IsModerator {
-		power = 50
+		power = fbPowerModerator
 	}
 	return bridgev2.ChatMember{
 		EventSender: m.makeEventSender(tbl.ContactId),

@@ -96,3 +96,30 @@ func TestThreadsWithStateChanges(t *testing.T) {
 		t.Errorf("thread key not mapped: %v", mapped)
 	}
 }
+
+func TestAdminStatusChange(t *testing.T) {
+	sender := bridgev2.EventSender{Sender: "42"}
+	for _, isAdmin := range []bool{true, false} {
+		ml := adminStatusChange(sender, isAdmin)
+		member, ok := ml.MemberMap["42"]
+		if !ok || member.PowerLevel == nil {
+			t.Fatalf("no power level for the member: %+v", ml)
+		}
+		want := 0
+		if isAdmin {
+			want = fbPowerAdmin
+		}
+		if *member.PowerLevel != want {
+			t.Errorf("admin=%v: power %d, want %d", isAdmin, *member.PowerLevel, want)
+		}
+		if ml.IsFull {
+			t.Error("one member's change is not the full member list")
+		}
+	}
+	// Its admin text ("Anna made Ben an admin") is shown by the power level change.
+	if !threadsWithStateChanges(&table.LSTable{
+		LSUpdateThreadParticipantAdminStatus: []*table.LSUpdateThreadParticipantAdminStatus{{ThreadKey: 7}},
+	}, func(k int64) int64 { return k }).Has(7) {
+		t.Error("an admin change is a state change")
+	}
+}

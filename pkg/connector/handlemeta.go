@@ -397,6 +397,7 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 	collectPortalEvents(params, tbl.LSUpsertReaction, m.handleUpsertReaction, &innerQueue)
 	collectPortalEvents(params, tbl.LSDeleteReaction, m.handleDeleteReaction, &innerQueue)
 	collectPortalEvents(params, tbl.LSRemoveParticipantFromThread, m.handleRemoveParticipant, &innerQueue)
+	collectPortalEvents(params, tbl.LSUpdateThreadParticipantAdminStatus, m.handleAdminStatus, &innerQueue)
 	collectPortalEvents(params, pinsByThread(tbl), m.handlePins, &innerQueue)
 	m.handleTableCalls(ctx, tbl, params.portalKeyFor)
 	// TODO request more inbox if applicable
@@ -895,7 +896,26 @@ func collectPortalEvents[T ThreadKeyable](
 	}
 }
 
-// threadsWithStateChanges lists the threads whose membership, name, photo or pins change in this
+// handleAdminStatus makes someone an admin of a group, or no longer one: their power level in the room.
+func (m *MetaClient) handleAdminStatus(tk handlerParams, row *table.LSUpdateThreadParticipantAdminStatus) bridgev2.RemoteEvent {
+	return m.wrapChatInfoChange(tk.ID, row.ContactId, tk.Type, &bridgev2.ChatInfoChange{
+		MemberChanges: adminStatusChange(m.makeEventSender(row.ContactId), row.IsAdmin),
+	}, "LSUpdateThreadParticipantAdminStatus")
+}
+
+func adminStatusChange(sender bridgev2.EventSender, isAdmin bool) *bridgev2.ChatMemberList {
+	power := 0
+	if isAdmin {
+		power = fbPowerAdmin
+	}
+	return &bridgev2.ChatMemberList{
+		MemberMap: bridgev2.ChatMemberMap{
+			sender.Sender: {EventSender: sender, Membership: event.MembershipJoin, PowerLevel: &power},
+		},
+	}
+}
+
+// threadsWithStateChanges lists the threads whose membership, name, photo, pins or admins change in this
 // batch. Meta sends the admin text for such a change ("Anna added Ben") in the same batch as the
 // change itself, and the change is bridged as room state that Matrix clients already render.
 func threadsWithStateChanges(tbl *table.LSTable, mapKey func(int64) int64) exmaps.Set[int64] {
@@ -914,6 +934,9 @@ func threadsWithStateChanges(tbl *table.LSTable, mapKey func(int64) int64) exmap
 		add(row.ThreadKey)
 	}
 	for _, row := range tbl.LSSetPinnedMessage {
+		add(row.ThreadKey)
+	}
+	for _, row := range tbl.LSUpdateThreadParticipantAdminStatus {
 		add(row.ThreadKey)
 	}
 	return set

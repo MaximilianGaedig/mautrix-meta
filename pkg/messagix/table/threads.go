@@ -377,6 +377,10 @@ type LSUpdateThreadParticipantAdminStatus struct {
 	Unrecognized map[int]any `json:",omitempty"`
 }
 
+func (ls *LSUpdateThreadParticipantAdminStatus) GetThreadKey() int64 {
+	return ls.ThreadKey
+}
+
 type LSUpdateParticipantSubscribeSourceText struct {
 	ThreadKey       int64  `index:"0" json:",omitempty"`
 	ContactId       int64  `index:"1" json:",omitempty"`
