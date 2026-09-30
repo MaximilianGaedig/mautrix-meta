@@ -132,6 +132,23 @@ func (table *LSTable) WrapMessages() (upsert map[int64]*UpsertMessages, insert [
 				Msg("Got XMA attachment in table without corresponding message")
 		}
 	}
+	polls := table.WrapPolls()
+	for _, msg := range messageMap {
+		for _, xma := range msg.XMAAttachments {
+			if !xma.IsPoll() {
+				continue
+			}
+			poll, ok := polls[xma.PollID()]
+			if !ok {
+				poll = &WrappedPoll{PollID: xma.PollID(), ThreadKey: xma.ThreadKey}
+			}
+			// The card is a copy of what the poll rows say, so it only fills what they don't.
+			poll.Question = xma.PollQuestion()
+			poll.CardOptions = xma.PollItems()
+			poll.CardTruncated = xma.PollItemsTruncated()
+			msg.Poll = poll
+		}
+	}
 	for _, blob := range table.LSInsertStickerAttachment {
 		msg, ok := messageMap[blob.MessageId]
 		if ok {
@@ -154,6 +171,10 @@ type WrappedMessage struct {
 	XMAAttachments  []*WrappedXMA
 	Stickers        []*LSInsertStickerAttachment
 	Reactions       []*LSUpsertReaction
+	// The poll the message's poll card shows, set by the connector when the message carries one.
+	Poll *WrappedPoll
+	// Set by the connector when the poll of Poll was already bridged from another message.
+	PollAlreadyBridged bool
 
 	ThreadID         string
 	IsSubthreadStart bool

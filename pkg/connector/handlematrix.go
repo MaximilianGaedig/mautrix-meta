@@ -497,6 +497,9 @@ func (m *MetaClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev
 		log.Trace().Any("response", resp).Msg("WhatsApp delete response")
 		return err
 	default:
+		if pollID, voterID, ok := parsePollVoteID(msg.TargetMessage.ID); ok {
+			return m.retractPollVote(ctx, msg, pollID, voterID)
+		}
 		return fmt.Errorf("invalid message ID")
 	}
 }

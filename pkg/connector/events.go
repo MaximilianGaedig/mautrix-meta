@@ -178,6 +178,7 @@ func (evt *FBMessageEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 	if cli == nil {
 		return nil, messagix.ErrClientIsNil
 	}
+	evt.m.prepareMessagePoll(ctx, evt.WrappedMessage)
 	return evt.m.Main.MsgConv.ToMatrix(ctx, portal, cli, evt.m.UserLogin, intent, evt.GetID(), evt.WrappedMessage), nil
 }
 

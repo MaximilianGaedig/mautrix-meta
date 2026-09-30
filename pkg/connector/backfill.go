@@ -351,6 +351,7 @@ func (m *MetaClient) wrapBackfillEvents(ctx context.Context, portal *bridgev2.Po
 				Msg("Message ID timestamp mismatch in backfill")
 		}
 		msgID := metaid.MakeFBMessageID(msg.MessageId)
+		m.prepareMessagePoll(ctx, msg)
 		wrappedMessages[i] = &bridgev2.BackfillMessage{
 			ConvertedMessage: m.Main.MsgConv.ToMatrix(ctx, portal, m.Client, m.UserLogin, intent, msgID, msg),
 			Sender:           sender,

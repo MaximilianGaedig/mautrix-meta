@@ -152,6 +152,7 @@ func (mc *MessageConverter) ToMatrix(
 	}
 	album.Tag(albumItems, AlbumID(messageID))
 	var urlPreviews []*table.WrappedXMA
+	hasPoll := false
 	for i, xmaAtt := range msg.XMAAttachments {
 		partID := networkid.PartID(fmt.Sprintf("xma_attachment_%d", i))
 		ctx := context.WithValue(ctx, mediadl.ContextKeyPartID, partID)
@@ -159,8 +160,32 @@ func (mc *MessageConverter) ToMatrix(
 			// URL previews are handled in the text section
 			urlPreviews = append(urlPreviews, xmaAtt)
 			continue
-		} else if xmaAtt.CTA != nil && strings.HasPrefix(xmaAtt.CTA.Type_, "xma_poll_") {
-			// Skip poll metadata entirely for now
+		} else if xmaAtt.IsPoll() {
+			// Messenger shows a poll as a card in the message that started it, and may show the same
+			// card again in the service messages about votes. Only the message that got to the poll
+			// first is the poll.
+			if msg.PollAlreadyBridged {
+				continue
+			}
+			if pollPart, _, ok := PollFromTable(msg.Poll); ok && msg.Poll.PollID == xmaAtt.PollID() {
+				pollPart.ID = partID
+				cm.Parts = append(cm.Parts, pollPart)
+				importantPartIDs = append(importantPartIDs, partID)
+				hasPoll = true
+			} else if msg.Poll != nil {
+				zerolog.Ctx(ctx).Warn().
+					Int64("poll_id", xmaAtt.PollID()).
+					Bool("card_truncated", msg.Poll.CardTruncated).
+					Int("option_rows", len(msg.Poll.Options)).
+					Msg("Don't know enough about poll to bridge it as a poll, bridging its card as text")
+				cm.Parts = append(cm.Parts, &bridgev2.ConvertedMessagePart{
+					Type: event.EventMessage,
+					Content: &event.MessageEventContent{
+						MsgType: event.MsgNotice,
+						Body:    PollFallbackText(msg.Poll),
+					},
+				})
+			}
 			continue
 		}
 		cm.Parts = append(cm.Parts, mc.xmaAttachmentToMatrix(ctx, xmaAtt)...)
@@ -232,7 +257,8 @@ func (mc *MessageConverter) ToMatrix(
 			Extra:   extra,
 			// Joins, leaves, renames, new photos and pins are also bridged as room state, which
 			// Matrix clients render; the connector marks the admin text that came with one.
-			DontBridge: msg.IsAdminMessage && msg.AdminTextShownByState,
+			// The same goes for the admin text that announces a poll, which the poll shows.
+			DontBridge: msg.IsAdminMessage && (msg.AdminTextShownByState || hasPoll),
 		})
 	}
 	if len(cm.Parts) == 0 {
@@ -291,7 +317,7 @@ func (mc *MessageConverter) ToMatrix(
 		}
 	}
 
-	if cm.MergeCaption() {
+	if !hasPoll && cm.MergeCaption() {
 		// The MergeCaption method only does something if there are exactly two
 		// parts in the message, and we don't add text parts to the "important"
 		// slice, so we are safe to assume that if it returns true, then there is

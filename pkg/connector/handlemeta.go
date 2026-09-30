@@ -401,6 +401,8 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 	collectPortalEvents(params, tbl.LSDeleteLiveLocationSharer, m.handleLiveLocationDelete, &innerQueue)
 	collectPortalEvents(params, tbl.LSUpdateThreadParticipantAdminStatus, m.handleAdminStatus, &innerQueue)
 	collectPortalEvents(params, pinsByThread(tbl), m.handlePins, &innerQueue)
+	// Votes come after the messages, so that a poll that starts in this batch can already be voted on.
+	collectPortalEvents(params, m.pollRows(ctx, tbl), m.handlePollRow, &innerQueue)
 	m.handleTableCalls(ctx, tbl, params.portalKeyFor)
 	// TODO request more inbox if applicable
 

@@ -26,6 +26,8 @@ type MessageMetadata struct {
 	// Metadata for postponed fetching of XMA media.
 	XMAFetchMeta *XMAFetchMeta `json:"xma_fetch_meta,omitempty"`
 	XMAFetched   bool          `json:"xma_fetched,omitempty"`
+	// Set on the message that carries a poll.
+	Poll *PollMetadata `json:"poll,omitempty"`
 }
 
 type XMAFetchMeta struct {

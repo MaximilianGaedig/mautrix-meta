@@ -54,7 +54,7 @@ func (m *MetaConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 }
 
 func (m *MetaConnector) GetBridgeInfoVersion() (info, caps int) {
-	return 1, 16
+	return 1, 17
 }
 
 const MaxTextLength = 20000
@@ -70,7 +70,7 @@ func supportedIfFFmpeg() event.CapabilitySupportLevel {
 }
 
 func capID() string {
-	base := "fi.mau.meta.capabilities.2026_07_21"
+	base := "fi.mau.meta.capabilities.2026_09_30"
 	if ffmpeg.Supported() {
 		return base + "+ffmpeg"
 	}
@@ -175,10 +175,26 @@ var metaCaps = &event.RoomFeatures{
 	DeleteChat: true,
 }
 
+// withPolls says that a room takes part in Messenger polls. Votes go both ways, but a poll can only
+// be closed on Messenger: bridgev2 doesn't pass Matrix poll ends to the network. Messenger polls
+// are always public and allow any number of choices.
+func withPolls(features *event.RoomFeatures) *event.RoomFeatures {
+	clone := features.Clone()
+	clone.ID += "+polls"
+	clone.Poll = event.CapLevelFullySupported
+	clone.PollEnd = event.CapLevelRejected
+	clone.PollHiddenVotes = event.CapLevelRejected
+	clone.PollDuplicateOptions = event.CapLevelRejected
+	return clone
+}
+
 var metaCapsWithThreads *event.RoomFeatures
 var metaCapsWithE2E *event.RoomFeatures
 var metaCapsWithE2EGroup *event.RoomFeatures
 var metaCapsGroup *event.RoomFeatures
+var metaCapsPolls *event.RoomFeatures
+var metaCapsGroupPolls *event.RoomFeatures
+var metaCapsWithThreadsPolls *event.RoomFeatures
 
 func init() {
 	metaCapsWithThreads = metaCaps.Clone()
@@ -210,11 +226,20 @@ func init() {
 		event.StateRoomAvatar.Type: {Level: event.CapLevelFullySupported},
 	}
 	metaCapsGroup.MemberActions = metaCapsWithE2EGroup.MemberActions.Clone()
+
+	// Polls are a Messenger feature, and don't work in encrypted chats, which have no poll task.
+	metaCapsPolls = withPolls(metaCaps)
+	metaCapsGroupPolls = withPolls(metaCapsGroup)
+	metaCapsWithThreadsPolls = withPolls(metaCapsWithThreads)
 }
 
 func (m *MetaClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
+	polls := !m.LoginMeta.Platform.IsInstagram()
 	switch portal.Metadata.(*metaid.PortalMetadata).ThreadType {
 	case table.COMMUNITY_GROUP:
+		if polls {
+			return metaCapsWithThreadsPolls
+		}
 		return metaCapsWithThreads
 	case table.ENCRYPTED_OVER_WA_ONE_TO_ONE:
 		return metaCapsWithE2E
@@ -222,7 +247,13 @@ func (m *MetaClient) GetCapabilities(ctx context.Context, portal *bridgev2.Porta
 		return metaCapsWithE2EGroup
 	}
 	if portal.RoomType == database.RoomTypeDM {
+		if polls {
+			return metaCapsPolls
+		}
 		return metaCaps
+	}
+	if polls {
+		return metaCapsGroupPolls
 	}
 	return metaCapsGroup
 }

@@ -406,3 +406,28 @@ func (db *MetaDB) GetIGReactionTarget(ctx context.Context, portalKey networkid.P
 	}
 	return
 }
+
+// PutPoll remembers that the message shows the poll, unless another message already does. It
+// returns the ID of the message that shows the poll, which is the given one if it was saved now or
+// before.
+func (db *MetaDB) PutPoll(ctx context.Context, pollID, threadKey int64, messageID string) (string, error) {
+	var saved string
+	err := db.QueryRow(ctx, `
+		INSERT INTO meta_poll (bridge_id, poll_id, thread_key, message_id)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (bridge_id, poll_id) DO UPDATE SET poll_id = meta_poll.poll_id
+		RETURNING message_id
+	`, db.BridgeID, pollID, threadKey, messageID).Scan(&saved)
+	return saved, err
+}
+
+// GetPoll finds the message that shows a poll. It returns an empty ID if there is none.
+func (db *MetaDB) GetPoll(ctx context.Context, pollID int64) (threadKey int64, messageID string, err error) {
+	err = db.QueryRow(ctx, `
+		SELECT thread_key, message_id FROM meta_poll WHERE bridge_id = $1 AND poll_id = $2
+	`, db.BridgeID, pollID).Scan(&threadKey, &messageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", nil
+	}
+	return
+}
