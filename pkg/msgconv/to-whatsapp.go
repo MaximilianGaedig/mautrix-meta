@@ -48,6 +48,7 @@ import (
 
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 	"go.mau.fi/mautrix-meta/pkg/msgconv/mediadl"
+	"go.mau.fi/mautrix-meta/pkg/msgconv/textfmt"
 )
 
 func (mc *MessageConverter) TextToWhatsApp(ctx context.Context, portal *bridgev2.Portal, content *event.MessageEventContent) *waCommon.MessageText {
@@ -102,7 +103,7 @@ func (mc *MessageConverter) ToWhatsApp(
 			return nil, nil, err
 		}
 	case event.MsgLocation:
-		lat, long, err := parseGeoURI(content.GeoURI)
+		lat, long, err := textfmt.ParseGeoURI(content.GeoURI)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -186,24 +187,6 @@ func (mc *MessageConverter) ToWhatsApp(
 	} else {
 		return nil, nil, fmt.Errorf("internal error: no content set")
 	}
-}
-
-func parseGeoURI(uri string) (lat, long float64, err error) {
-	if !strings.HasPrefix(uri, "geo:") {
-		err = fmt.Errorf("uri doesn't have geo: prefix")
-		return
-	}
-	// Remove geo: prefix and anything after ;
-	coordinates := strings.Split(strings.TrimPrefix(uri, "geo:"), ";")[0]
-
-	if splitCoordinates := strings.Split(coordinates, ","); len(splitCoordinates) != 2 {
-		err = fmt.Errorf("didn't find exactly two numbers separated by a comma")
-	} else if lat, err = strconv.ParseFloat(splitCoordinates[0], 64); err != nil {
-		err = fmt.Errorf("latitude is not a number: %w", err)
-	} else if long, err = strconv.ParseFloat(splitCoordinates[1], 64); err != nil {
-		err = fmt.Errorf("longitude is not a number: %w", err)
-	}
-	return
 }
 
 func clampTo400(w, h int) (int, int) {

@@ -51,7 +51,7 @@ func (ic *IGConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 }
 
 func (ic *IGConnector) GetBridgeInfoVersion() (info, caps int) {
-	return 1, 17
+	return 1, 18
 }
 
 const MaxTextLength = 1000
@@ -151,8 +151,9 @@ var igCaps = &event.RoomFeatures{
 	MessageRequest: &event.MessageRequestFeatures{
 		AcceptWithButton: event.CapLevelFullySupported,
 	},
-	//LocationMessage: event.CapLevelPartialSupport,
-	DeleteChat: true,
+	// Neither network has a way of sharing a location, so the place is sent as text with a link to a map.
+	LocationMessage: event.CapLevelPartialSupport,
+	DeleteChat:      true,
 }
 
 var igCapsGroup *event.RoomFeatures

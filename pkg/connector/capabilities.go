@@ -54,7 +54,7 @@ func (m *MetaConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 }
 
 func (m *MetaConnector) GetBridgeInfoVersion() (info, caps int) {
-	return 1, 17
+	return 1, 18
 }
 
 const MaxTextLength = 20000
@@ -171,8 +171,9 @@ var metaCaps = &event.RoomFeatures{
 	MessageRequest: &event.MessageRequestFeatures{
 		AcceptWithButton: event.CapLevelFullySupported,
 	},
-	//LocationMessage: event.CapLevelPartialSupport,
-	DeleteChat: true,
+	// Neither network has a way of sharing a location, so the place is sent as text with a link to a map.
+	LocationMessage: event.CapLevelPartialSupport,
+	DeleteChat:      true,
 }
 
 // withPolls says that a room takes part in Messenger polls. Votes go both ways, but a poll can only

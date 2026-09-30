@@ -33,6 +33,7 @@ import (
 	"go.mau.fi/mautrix-meta/pkg/messagix/types"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 	"go.mau.fi/mautrix-meta/pkg/msgconv/mediadl"
+	"go.mau.fi/mautrix-meta/pkg/msgconv/textfmt"
 )
 
 func (mc *MessageConverter) ToInstagram(
@@ -63,6 +64,14 @@ func (mc *MessageConverter) ToInstagram(
 		if content.FormattedBody != "" {
 			content.FormattedBody = "/me " + content.FormattedBody
 		}
+	}
+	if content.MsgType == event.MsgLocation {
+		// Instagram has no way of sending a location, so the place is sent as text with a map link.
+		text, err := textfmt.LocationText(content)
+		if err != nil {
+			return nil, err
+		}
+		content.MsgType, content.Body, content.Format, content.FormattedBody = event.MsgText, text, "", ""
 	}
 	switch content.MsgType {
 	case event.MsgText, event.MsgNotice, event.MsgEmote:
