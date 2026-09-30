@@ -2,9 +2,11 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2"
 
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 )
@@ -101,4 +103,17 @@ func (m *MetaClient) markBackfillComplete(ctx context.Context, meta *metaid.User
 	if err := m.UserLogin.Save(ctx); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to save backfill completion state")
 	}
+}
+
+var _ bridgev2.ChatListSyncingNetworkAPI = (*MetaClient)(nil)
+
+// SyncChatList goes over the whole inbox again: a full reconnect loads the recent threads and resyncs each
+// (creating a room for any that has none, e.g. after delete-portal), and the thread backfill then walks the
+// older ones the same way, whether or not it already ran after login.
+func (m *MetaClient) SyncChatList(ctx context.Context) error {
+	m.FullReconnect()
+	if !m.connectWaiter.WaitTimeout(ConnectWaitTimeout) {
+		return errors.New("not connected to Meta after reconnecting")
+	}
+	return m.runThreadBackfill(ctx)
 }
