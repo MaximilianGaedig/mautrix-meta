@@ -115,6 +115,22 @@ func (m *MetaClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCrea
 		Int64("thread_id", realThreadID).
 		Int64("req_thread_id", repl.ThreadKey1).
 		Msg("Created group")
+	// Messenger creates a group without a name or picture, so a group made from a named Matrix room
+	// came out unnamed; they are set on the new thread straight after, as a rename from Matrix would.
+	if params.Name != nil && params.Name.Name != "" {
+		if _, err = m.Client.ExecuteTasks(ctx, &socket.RenameThreadTask{
+			ThreadKey:  realThreadID,
+			ThreadName: params.Name.Name,
+			SyncGroup:  1,
+		}); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to name the new group")
+		}
+	}
+	if params.Avatar != nil && params.Avatar.URL != "" {
+		if err = m.setThreadAvatar(ctx, realThreadID, params.Avatar.URL); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to set the new group's picture")
+		}
+	}
 	portal, err := m.Main.Bridge.GetPortalByKey(ctx, m.makeFBPortalKey(realThreadID, table.GROUP_THREAD))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get portal: %w", err)

@@ -711,41 +711,42 @@ func (m *MetaClient) HandleMatrixRoomAvatar(ctx context.Context, msg *bridgev2.M
 	if msg.Portal.RoomType == database.RoomTypeDM {
 		return false, fmt.Errorf("changing avatar not supported in DMs")
 	}
-	threadID := metaid.ParseFBPortalID(msg.Portal.ID)
-	var imageID int64
 	if msg.Content.URL == "" {
 		// TODO: handle removing avatar. Messenger web doesn't have a remove option?
 		return false, fmt.Errorf("removing avatar not implemented")
-	} else {
-		data, err := m.Main.Bridge.Bot.DownloadMedia(ctx, msg.Content.URL, nil)
-		if err != nil {
-			return false, fmt.Errorf("failed to download avatar: %w", err)
-		}
-		mimeType := http.DetectContentType(data)
-		resp, err := m.Client.GetHTTP().SendMercuryUploadRequest(ctx, threadID, &httpclient.MercuryUploadMedia{
-			Filename:  "avatar.jpg",
-			MimeType:  mimeType,
-			MediaData: data,
-		})
-		if err != nil {
-			return false, fmt.Errorf("failed to upload avatar: %w", err)
-		}
-
-		imageID = resp.Payload.RealMetadata.GetFbId()
-		if imageID == 0 {
-			return false, fmt.Errorf("no image ID received from upload")
-		}
 	}
-	_, err := m.Client.ExecuteTasks(ctx, &socket.SetThreadImageTask{
-		ThreadKey: threadID,
-		ImageID:   imageID,
-		SyncGroup: 1,
-	})
-	if err != nil {
+	if err := m.setThreadAvatar(ctx, metaid.ParseFBPortalID(msg.Portal.ID), msg.Content.URL); err != nil {
 		return false, err
 	}
 	// TODO update portal metadata
 	return true, nil
+}
+
+// setThreadAvatar uploads a Matrix image and makes it a Messenger group's picture.
+func (m *MetaClient) setThreadAvatar(ctx context.Context, threadID int64, url id.ContentURIString) error {
+	data, err := m.Main.Bridge.Bot.DownloadMedia(ctx, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to download avatar: %w", err)
+	}
+	mimeType := http.DetectContentType(data)
+	resp, err := m.Client.GetHTTP().SendMercuryUploadRequest(ctx, threadID, &httpclient.MercuryUploadMedia{
+		Filename:  "avatar.jpg",
+		MimeType:  mimeType,
+		MediaData: data,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to upload avatar: %w", err)
+	}
+	imageID := resp.Payload.RealMetadata.GetFbId()
+	if imageID == 0 {
+		return fmt.Errorf("no image ID received from upload")
+	}
+	_, err = m.Client.ExecuteTasks(ctx, &socket.SetThreadImageTask{
+		ThreadKey: threadID,
+		ImageID:   imageID,
+		SyncGroup: 1,
+	})
+	return err
 }
 
 func (m *MetaClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.MatrixMembershipChange) (*bridgev2.MatrixMembershipResult, error) {
