@@ -314,6 +314,7 @@ func (s *callSession) ringRTC() error {
 		return fmt.Errorf("join MatrixRTC call: %w", err)
 	}
 	s.rtc.OnPeers(s.onRTCPeers)
+	s.rtc.OnMediaState(func(audioOn, videoOn bool) { go s.sendMetaMediaState(audioOn, videoOn) })
 	if err := s.sendRTCMembership(s.ctx); err != nil {
 		return err
 	}
@@ -396,6 +397,7 @@ func (s *callSession) connectRTCOutgoing() {
 		return
 	}
 	s.rtc.OnPeers(s.onRTCPeers)
+	s.rtc.OnMediaState(func(audioOn, videoOn bool) { go s.sendMetaMediaState(audioOn, videoOn) })
 	if err := s.sendRTCMembership(s.ctx); err != nil {
 		s.log.Err(err).Msg("Failed to publish call membership")
 		s.end(endFailed, "")

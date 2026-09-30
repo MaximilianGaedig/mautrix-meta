@@ -349,6 +349,8 @@ type callSession struct {
 	metaAnswered   bool
 	upgrading      bool // Matrix leg being upgraded to video
 	metaUpgrading  bool // Messenger leg being upgraded to video for Element's camera
+	// sentMediaState is the microphone and camera state last passed to Messenger (sendMetaMediaState).
+	sentMediaState *[2]bool
 	metaPrepare    sync.Once
 	metaICEOnce    sync.Once
 	metaICE        []webrtc.ICEServer
@@ -1865,27 +1867,42 @@ func (s *callSession) onMatrixStreamMetadata(evt *event.Event) {
 	if mine == nil {
 		return
 	}
+	s.sendMetaMediaState(!mine.AudioMuted, !mine.VideoMuted)
+}
+
+// sendMetaMediaState tells Messenger whether the Matrix side's microphone and camera are on, with a
+// CLIENT_MEDIA_UPDATE that carries only the tracks' state, as the web client sends when its user
+// mutes. Repeats of the state last sent are skipped.
+func (s *callSession) sendMetaMediaState(audioOn, videoOn bool) {
 	s.lock.Lock()
 	leg, cc := s.metaLeg, s.cc
+	state := [2]bool{audioOn, videoOn}
+	if s.sentMediaState != nil && *s.sentMediaState == state {
+		s.lock.Unlock()
+		return
+	}
 	s.lock.Unlock()
 	if leg == nil || cc == nil || leg.PC.CurrentLocalDescription() == nil {
 		return
 	}
 	version, err := callbridge.SDPVersion(leg.PC.CurrentLocalDescription().SDP)
 	if err != nil {
-		s.log.Warn().Err(err).Msg("No media version for Element's camera and microphone state")
+		s.log.Warn().Err(err).Msg("No media version for the Matrix side's camera and microphone state")
 		return
 	}
-	tracks := map[string]rtcsignal.TrackInfo{leg.TrackID: {Enabled: !mine.AudioMuted, Label: rtcsignal.TrackLabelAudio}}
+	tracks := map[string]rtcsignal.TrackInfo{leg.TrackID: {Enabled: audioOn, Label: rtcsignal.TrackLabelAudio}}
 	if leg.LocalVideo != nil {
-		tracks[leg.VideoTrackID] = rtcsignal.TrackInfo{Enabled: !mine.VideoMuted, Label: rtcsignal.TrackLabelVideo}
+		tracks[leg.VideoTrackID] = rtcsignal.TrackInfo{Enabled: videoOn, Label: rtcsignal.TrackLabelVideo}
 	}
 	if _, err = s.cb.sig.Request(s.ctx, cc.NewClientMediaUpdate(version, tracks, "")); err != nil {
-		s.log.Err(err).Msg("Failed to pass Element's camera and microphone state to Messenger")
+		s.log.Err(err).Msg("Failed to pass the Matrix side's camera and microphone state to Messenger")
 		return
 	}
-	s.log.Info().Bool("audio_muted", mine.AudioMuted).Bool("video_muted", mine.VideoMuted).
-		Msg("Passed Element's camera and microphone state to Messenger")
+	s.lock.Lock()
+	s.sentMediaState = &state
+	s.lock.Unlock()
+	s.log.Info().Bool("audio_on", audioOn).Bool("video_on", videoOn).
+		Msg("Passed the Matrix side's camera and microphone state to Messenger")
 }
 
 func (s *callSession) onMatrixAnswer(ans *event.CallAnswerEventContent) {
