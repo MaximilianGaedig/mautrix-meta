@@ -139,30 +139,15 @@ func (mc *MessageConverter) ToWhatsApp(
 		}
 	}
 	var disappearTimer time.Duration
-	var disappearType event.DisappearingType
 	if content.BeeperDisappearingTimer != nil {
 		disappearTimer = content.BeeperDisappearingTimer.Timer.Duration
-		disappearType = content.BeeperDisappearingTimer.Type
 	} else if portal.Disappear.Timer != 0 {
 		disappearTimer = portal.Disappear.Timer
-		disappearType = portal.Disappear.Type
 	}
-	if disappearTimer > 0 {
-		var ephemeralityType waMsgApplication.MessageApplication_EphemeralSetting_EphemeralityType
-		switch disappearType {
-		// TODO native never seems to set these
-		//case event.DisappearingTypeAfterRead:
-		//	ephemeralityType = waMsgApplication.MessageApplication_EphemeralSetting_SEEN_BASED_WITH_TIMER
-		//case event.DisappearingTypeAfterSend:
-		//	ephemeralityType = waMsgApplication.MessageApplication_EphemeralSetting_SEND_BASED_WITH_TIMER
-		}
-		meta.Ephemeral = &waMsgApplication.MessageApplication_Metadata_ChatEphemeralSetting{
-			ChatEphemeralSetting: &waMsgApplication.MessageApplication_EphemeralSetting{
-				EphemeralExpiration:       proto.Uint32(uint32(disappearTimer.Seconds())),
-				EphemeralSettingTimestamp: ptr.NonZero(portal.Metadata.(*metaid.PortalMetadata).EphemeralSettingTimestamp),
-				EphemeralityType:          &ephemeralityType,
-			},
-		}
+	// A chat that has had a timer set keeps sending its setting, also when it is off: that is how a chat
+	// where the timer was turned off from Matrix tells the other side.
+	if settingTS := portal.Metadata.(*metaid.PortalMetadata).EphemeralSettingTimestamp; disappearTimer > 0 || settingTS != 0 {
+		meta.Ephemeral = ephemeralSettingMetadata(disappearTimer, settingTS)
 	}
 	if waContent.Content != nil {
 		waConsumerApp := &waConsumerApplication.ConsumerApplication{
@@ -426,5 +411,18 @@ func msgToMediaType(msgType event.MessageType) whatsmeow.MediaType {
 		fallthrough
 	default:
 		return whatsmeow.MediaDocument
+	}
+}
+
+// ephemeralSettingMetadata is the disappearing message setting that every message of an encrypted chat carries
+// in its metadata. Native clients don't use the sender or seen based types, so neither does the bridge.
+func ephemeralSettingMetadata(timer time.Duration, settingTS int64) *waMsgApplication.MessageApplication_Metadata_ChatEphemeralSetting {
+	var ephemeralityType waMsgApplication.MessageApplication_EphemeralSetting_EphemeralityType
+	return &waMsgApplication.MessageApplication_Metadata_ChatEphemeralSetting{
+		ChatEphemeralSetting: &waMsgApplication.MessageApplication_EphemeralSetting{
+			EphemeralExpiration:       proto.Uint32(uint32(timer.Seconds())),
+			EphemeralSettingTimestamp: ptr.NonZero(settingTS),
+			EphemeralityType:          &ephemeralityType,
+		},
 	}
 }
