@@ -255,6 +255,9 @@ func (w *writer) dataMessages(id int16, msgs []DataMessage) {
 const (
 	TrackLabelAudio int32 = 0
 	TrackLabelVideo int32 = 1
+	// TrackLabelScreen is a shared screen, a track of its own beside the camera (web client enum
+	// {AUDIO:0,VIDEO:1,SCREEN:2}).
+	TrackLabelScreen int32 = 2
 )
 
 // TrackInfo is ClientTrackInfo (ClientMediaStatus.tracks value).

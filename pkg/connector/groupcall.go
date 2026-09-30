@@ -86,7 +86,8 @@ type groupParticipant struct {
 	joined bool       // call.member sent
 	member id.EventID // the call.member event (ring notifications reference it)
 	video  callbridge.RTPWriter
-	tracks map[string]bool // Messenger track ids being relayed
+	screen callbridge.RTPWriter // their shared screen, published as a screen share
+	tracks map[string]bool      // Messenger track ids being relayed
 }
 
 // groupCall is a bridged Messenger group call (the bridge allows one call at a time, 1:1 or group).
@@ -115,6 +116,7 @@ type groupCall struct {
 	remoteCands    []webrtc.ICECandidateInit
 	owners         map[string]string // Messenger track id -> owner user id (SMU media status)
 	subscribed     map[string]bool   // video track ids with a TRACK subscription
+	screens        map[string]bool   // track ids that are a participant's shared screen
 	participants   map[string]*groupParticipant
 	upstream       *groupParticipant // whose LiveKit leg takes the Matrix user's media
 	focus          *rtcTransport
@@ -140,6 +142,7 @@ func (cb *callBridge) newGroupCall(ctx context.Context, portal *bridgev2.Portal,
 		incoming:     incoming,
 		owners:       map[string]string{},
 		subscribed:   map[string]bool{},
+		screens:      map[string]bool{},
 		participants: map[string]*groupParticipant{},
 	}
 	g.log = cb.log.With().
@@ -789,6 +792,9 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 	for trackID, ti := range smu.MediaStatus {
 		if ti.Owner != "" {
 			g.owners[trackID] = ti.Owner
+			if ti.Label == rtcsignal.TrackLabelScreen {
+				g.screens[trackID] = true
+			}
 		}
 	}
 	g.lock.Unlock()
@@ -858,7 +864,10 @@ func (g *groupCall) updateSubscriptions(status map[string]rtcsignal.TrackInfo) {
 	self := strconv.FormatInt(g.m.selfFBID(), 10)
 	changed := false
 	for trackID, ti := range status {
-		if ti.Label != rtcsignal.TrackLabelVideo || ti.Owner == self || !ti.Enabled || g.subscribed[trackID] {
+		// Screen shares too: a participant sharing their screen publishes it as a track of its own
+		// (label SCREEN) and pauses the camera, so without it the Matrix side saw a frozen camera.
+		isVideo := ti.Label == rtcsignal.TrackLabelVideo || ti.Label == rtcsignal.TrackLabelScreen
+		if !isVideo || ti.Owner == self || !ti.Enabled || g.subscribed[trackID] {
 			continue
 		}
 		g.subscribed[trackID] = true
@@ -936,19 +945,12 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 	}
 	var stats callbridge.RelayStats
 	if tr.Kind() == webrtc.RTPCodecTypeVideo {
-		g.lock.Lock()
-		w := p.video
-		g.lock.Unlock()
-		if w == nil {
-			if w, err = rtc.AddVideoTrack(tr.Codec().MimeType); err != nil {
-				log.Err(err).Msg("Failed to publish a participant's video")
-				return
-			}
-			g.lock.Lock()
-			p.video = w
-			g.lock.Unlock()
+		w, screen, werr := g.videoWriter(p, rtc, tr)
+		if werr != nil {
+			log.Err(werr).Msg("Failed to publish a participant's video")
+			return
 		}
-		g.forwardKeyframes(rtc, tr)
+		g.forwardKeyframes(rtc, tr, screen)
 		err = callbridge.RelayVideo(g.ctx, tr, uint8(tr.PayloadType()), w, &stats, log)
 	} else {
 		err = callbridge.Relay(g.ctx, tr, uint8(tr.PayloadType()), rtc.AudioWriter(), &stats, log)
@@ -959,7 +961,7 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 // forwardKeyframes asks Messenger for keyframes of a participant's video: a few right away (nobody
 // in the Matrix call can show anything before one) and whenever the participant's LiveKit leg is
 // asked for one, at most every 500 ms.
-func (g *groupCall) forwardKeyframes(rtc *callbridge.RTCLeg, tr *webrtc.TrackRemote) {
+func (g *groupCall) forwardKeyframes(rtc *callbridge.RTCLeg, tr *webrtc.TrackRemote, screen bool) {
 	g.lock.Lock()
 	leg := g.leg
 	g.lock.Unlock()
@@ -969,7 +971,11 @@ func (g *groupCall) forwardKeyframes(rtc *callbridge.RTCLeg, tr *webrtc.TrackRem
 	ssrc := tr.SSRC()
 	var mu sync.Mutex
 	var last time.Time
-	rtc.OnKeyframeRequest(func() {
+	onRequest := rtc.OnKeyframeRequest
+	if screen {
+		onRequest = rtc.OnScreenKeyframeRequest
+	}
+	onRequest(func() {
 		mu.Lock()
 		if time.Since(last) < 500*time.Millisecond {
 			mu.Unlock()
@@ -991,6 +997,38 @@ func (g *groupCall) forwardKeyframes(rtc *callbridge.RTCLeg, tr *webrtc.TrackRem
 	}()
 }
 
+// videoWriter is where a participant's video track goes in the Matrix call: their camera, or - for
+// a track Messenger labels as a screen - a screen share of its own, published the first time.
+func (g *groupCall) videoWriter(p *groupParticipant, rtc *callbridge.RTCLeg, tr *webrtc.TrackRemote) (callbridge.RTPWriter, bool, error) {
+	g.lock.Lock()
+	screen := g.screens[tr.ID()]
+	w := p.video
+	if screen {
+		w = p.screen
+	}
+	g.lock.Unlock()
+	if w != nil {
+		return w, screen, nil
+	}
+	var err error
+	if screen {
+		w, err = rtc.AddScreenTrack(tr.Codec().MimeType)
+	} else {
+		w, err = rtc.AddVideoTrack(tr.Codec().MimeType)
+	}
+	if err != nil {
+		return nil, screen, err
+	}
+	g.lock.Lock()
+	if screen {
+		p.screen = w
+	} else {
+		p.video = w
+	}
+	g.lock.Unlock()
+	return w, screen, nil
+}
+
 // relayDecrypted relays an encrypted call's track: every frame is decrypted with the sender's key
 // (the sender is named by the track's msid, "<userId>:<cname>:<streamId>").
 func (g *groupCall) relayDecrypted(crypt *groupE2ee, p *groupParticipant, rtc *callbridge.RTCLeg, tr *webrtc.TrackRemote, log zerolog.Logger) {
@@ -1008,17 +1046,10 @@ func (g *groupCall) relayDecrypted(crypt *groupE2ee, p *groupParticipant, rtc *c
 	defer closeFn()
 	var stats callbridge.FrameRelayStats
 	if video {
-		g.lock.Lock()
-		w := p.video
-		g.lock.Unlock()
-		if w == nil {
-			if w, err = rtc.AddVideoTrack(tr.Codec().MimeType); err != nil {
-				log.Err(err).Msg("Failed to publish a participant's video")
-				return
-			}
-			g.lock.Lock()
-			p.video = w
-			g.lock.Unlock()
+		w, screen, werr := g.videoWriter(p, rtc, tr)
+		if werr != nil {
+			log.Err(werr).Msg("Failed to publish a participant's video")
+			return
 		}
 		g.lock.Lock()
 		leg := g.leg
@@ -1028,7 +1059,7 @@ func (g *groupCall) relayDecrypted(crypt *groupE2ee, p *groupParticipant, rtc *c
 				leg.RequestKeyframe(tr.SSRC())
 			}
 		}
-		g.forwardKeyframes(rtc, tr)
+		g.forwardKeyframes(rtc, tr, screen)
 		err = callbridge.RelayVideoTransformed(g.ctx, tr, uint8(tr.PayloadType()), tr.Codec().MimeType, w, xf, onLoss, &stats, log)
 	} else {
 		err = callbridge.RelayAudioTransformed(g.ctx, tr, uint8(tr.PayloadType()), rtc.AudioWriter(), xf, &stats, log)

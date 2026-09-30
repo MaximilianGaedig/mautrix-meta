@@ -83,3 +83,30 @@ func TestNewGroupCallDoesNotDeadlock(t *testing.T) {
 		t.Errorf("second group call: %v, want errBusy", err)
 	}
 }
+
+// A participant sharing their screen publishes it as a track of its own (label SCREEN) and pauses
+// the camera; the bridge subscribed to cameras only, so the Matrix side saw a frozen camera and no
+// screen. The screen track is subscribed to and known as a screen.
+func TestGroupCallSubscribesToScreenShares(t *testing.T) {
+	cb := &callBridge{log: zerolog.Nop(), m: &MetaClient{UserLogin: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "100"}}}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "555"}}}
+	g, err := cb.newGroupCall(context.Background(), portal, "555", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := map[string]rtcsignal.TrackInfo{
+		"cam": {Enabled: true, Owner: "200", Label: rtcsignal.TrackLabelVideo},
+		"scr": {Enabled: true, Owner: "200", Label: rtcsignal.TrackLabelScreen},
+		"mic": {Enabled: true, Owner: "200", Label: rtcsignal.TrackLabelAudio},
+	}
+	g.handleServerMediaUpdate(&rtcsignal.Message{Body: rtcsignal.Body{ServerMediaUpdateRequest: &rtcsignal.ServerMediaUpdateRequest{MediaStatus: status}}})
+	g.updateSubscriptions(status)
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	if !g.subscribed["scr"] || !g.subscribed["cam"] || g.subscribed["mic"] {
+		t.Errorf("subscribed = %v, want the camera and the screen", g.subscribed)
+	}
+	if !g.screens["scr"] || g.screens["cam"] {
+		t.Errorf("screens = %v, want only the screen track", g.screens)
+	}
+}
