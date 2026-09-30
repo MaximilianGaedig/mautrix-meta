@@ -42,6 +42,8 @@ import (
 // PresenceUnifiedJSON stream.
 type PresenceEvent struct {
 	*presencestream.Publish
+	// Raw is the publish exactly as the server sent it.
+	Raw []byte
 }
 
 // PresenceStreamClosedEvent is emitted when the presence stream goes away.
@@ -326,7 +328,7 @@ func (c *Client) handlePresenceFrame(ctx context.Context, pc *presenceClient, fr
 				Int("publish_type", int(pub.PublishType)).
 				Int("update_count", len(pub.PresenceUpdates)).
 				Msg("Received presence publish")
-			c.HandleEvent(ctx, &PresenceEvent{Publish: pub})
+			c.HandleEvent(ctx, &PresenceEvent{Publish: pub, Raw: delta.Data.Bytes})
 		case delta.Rewrite != nil:
 			log.Debug().Any("rewrite", delta.Rewrite).Msg("Presence stream rewrite request (ignored)")
 		}
