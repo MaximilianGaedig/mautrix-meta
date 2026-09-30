@@ -433,6 +433,13 @@ func (cb *callBridge) handleSignal(ctx context.Context, msg *rtcsignal.Message, 
 			callsignal.LogMessage(cb.log.Info(), msg).Str("via", string(via)).Msg("Incoming Messenger group call")
 			go cb.startIncomingGroup(context.WithoutCancel(ctx), msg)
 			return nil
+		case g != nil && g.abandoned():
+			// Everyone from Messenger has left the group call and only the Matrix side is still in it
+			// (Element Call leaves a while after the others): end it and take this call instead. The
+			// server repeats the RING until it is answered, so the next one starts the call.
+			callsignal.LogMessage(cb.log.Info(), msg).Msg("Ringing while alone in a group call, ending the group call")
+			go g.end("")
+			return nil
 		case g != nil:
 			callsignal.LogMessage(cb.log.Info(), msg).Msg("In a group call, answering ring as busy")
 			return rtcsignal.NewRingResponse(msg, rtcsignal.NewClientSessionID(), rtcsignal.DeviceStatusInAnotherCall)

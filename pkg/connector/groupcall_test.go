@@ -138,3 +138,30 @@ func TestGroupCallReportsOwnCamera(t *testing.T) {
 		t.Errorf("our audio = %+v", a)
 	}
 }
+
+// Element Call leaves a group call a while after the Messenger side does; a 1:1 call ringing in
+// that gap was turned away as busy. A call everyone from Messenger has left is abandoned - one
+// that is still ringing them is not.
+func TestGroupCallAbandonedOnceEveryoneLeft(t *testing.T) {
+	cb := &callBridge{log: zerolog.Nop(), m: &MetaClient{UserLogin: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "100"}}}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "557"}}}
+	g, err := cb.newGroupCall(context.Background(), portal, "557", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := func(s rtcsignal.ParticipantCallState) {
+		g.handleConferenceState(&rtcsignal.ConferenceStateRequest{ParticipantStates: map[string]rtcsignal.ParticipantState{"200": {State: s}}})
+	}
+	state(rtcsignal.StateRinging)
+	if g.abandoned() {
+		t.Fatal("a call still ringing the others counted as abandoned")
+	}
+	state(rtcsignal.StateConnected)
+	if g.abandoned() {
+		t.Fatal("a call with someone in it counted as abandoned")
+	}
+	state(rtcsignal.StateDisconnected)
+	if !g.abandoned() {
+		t.Fatal("a call everyone left isn't abandoned")
+	}
+}

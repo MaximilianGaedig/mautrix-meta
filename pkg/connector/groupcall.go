@@ -118,6 +118,8 @@ type groupCall struct {
 	subscribed     map[string]bool   // video track ids with a TRACK subscription
 	screens        map[string]bool   // track ids that are a participant's shared screen
 	sentMediaState *[2]bool          // the Matrix user's microphone and camera state last told to the SFU
+	present        map[string]bool   // Messenger participants connecting or connected
+	hadOthers      bool              // whether anyone from Messenger has been in the call
 	participants   map[string]*groupParticipant
 	upstream       *groupParticipant // whose LiveKit leg takes the Matrix user's media
 	focus          *rtcTransport
@@ -144,6 +146,7 @@ func (cb *callBridge) newGroupCall(ctx context.Context, portal *bridgev2.Portal,
 		owners:       map[string]string{},
 		subscribed:   map[string]bool{},
 		screens:      map[string]bool{},
+		present:      map[string]bool{},
 		participants: map[string]*groupParticipant{},
 	}
 	g.log = cb.log.With().
@@ -998,6 +1001,14 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 	return g.respond(msg, rtcsignal.Body{ServerMediaUpdateResponse: resp})
 }
 
+// abandoned is whether everyone from Messenger has left the call: only the Matrix side is still in
+// it, which is no reason to turn another call away as busy.
+func (g *groupCall) abandoned() bool {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	return g.hadOthers && len(g.present) == 0
+}
+
 // updateSubscriptions asks the SFU for every remote video track (tweb/web client: TRACK subscriptions
 // at MEDIUM quality; audio flows without one), keeping the dominant-speaker subscription.
 func (g *groupCall) updateSubscriptions(status map[string]rtcsignal.TrackInfo) {
@@ -1033,6 +1044,14 @@ func (g *groupCall) handleConferenceState(cs *rtcsignal.ConferenceStateRequest) 
 			continue
 		}
 		g.log.Debug().Str("user", userID).Int32("state", int32(ps.State)).Msg("Group call participant state")
+		g.lock.Lock()
+		if ps.State == rtcsignal.StateConnecting || ps.State == rtcsignal.StateConnected {
+			g.present[userID] = true
+			g.hadOthers = true
+		} else {
+			delete(g.present, userID)
+		}
+		g.lock.Unlock()
 		if userID == g.peerID {
 			switch ps.State {
 			case rtcsignal.StateDisconnected, rtcsignal.StateConnectionDropped, rtcsignal.StateRejected,
