@@ -20,17 +20,21 @@ func upd(id int64, active bool, lastActive int64) presencestream.Update {
 	return u
 }
 
+// offlineOnly is all the bridge says of someone who is not active: no status text, whatever
+// last-active time Messenger gave.
+var offlineOnly = presence.State{Presence: event.PresenceOffline}
+
 func TestMapPresenceUpdate(t *testing.T) {
 	a := upd(1, true, 1758290000)
-	if st := mapPresenceUpdate(&a); st.Presence != event.PresenceOnline || st.StatusMsg != "" || !st.Until.IsZero() {
+	if st := mapPresenceUpdate(&a); st != (presence.State{Presence: event.PresenceOnline}) {
 		t.Errorf("active: got %+v", st)
 	}
 	b := upd(2, false, 1758290000)
-	if st := mapPresenceUpdate(&b); st.Presence != event.PresenceOffline || st.StatusMsg != "last seen 2025-09-19T13:53:20Z" {
+	if st := mapPresenceUpdate(&b); st != offlineOnly {
 		t.Errorf("inactive with time: got %+v", st)
 	}
 	c := upd(3, false, 0)
-	if st := mapPresenceUpdate(&c); st.Presence != event.PresenceOffline || st.StatusMsg != "" {
+	if st := mapPresenceUpdate(&c); st != offlineOnly {
 		t.Errorf("inactive without time: got %+v", st)
 	}
 }
@@ -42,52 +46,48 @@ func TestMapLSContactPresence(t *testing.T) {
 		t.Errorf("active: got %+v", st)
 	}
 	expired := &table.LSDeleteThenInsertContactPresence{ContactId: 1, Status: 2, ExpirationTimestampMs: 1758289000000}
-	if st := mapLSContactPresence(expired, now); st.Presence != event.PresenceOffline || st.StatusMsg != "last seen 2025-09-19T13:36:40Z" {
+	if st := mapLSContactPresence(expired, now); st != offlineOnly {
 		t.Errorf("expired: got %+v", st)
 	}
 	offline := &table.LSDeleteThenInsertContactPresence{ContactId: 1, Status: 1, LastActiveTimestampMs: 1758280000000}
-	if st := mapLSContactPresence(offline, now); st.Presence != event.PresenceOffline || st.StatusMsg != "last seen 2025-09-19T11:06:40Z" {
+	if st := mapLSContactPresence(offline, now); st != offlineOnly {
 		t.Errorf("offline: got %+v", st)
 	}
 }
 
 func TestTrackerFullPublishDropsMissing(t *testing.T) {
 	var pt presenceTracker
-	t0 := time.Unix(1758290000, 0)
 	out := pt.applyPublish(&presencestream.Publish{
 		PublishType:     presencestream.PublishTypeFull,
 		PresenceUpdates: []presencestream.Update{upd(1, true, 0), upd(2, true, 0), upd(99, true, 0)},
-	}, 99, t0)
+	}, 99)
 	if len(out) != 2 || out[1].Presence != event.PresenceOnline || out[2].Presence != event.PresenceOnline {
 		t.Fatalf("first publish: %+v", out)
 	}
-	// Incremental: user 1 goes inactive without a timestamp, so the last time
-	// we saw them active is used.
-	t1 := t0.Add(time.Minute)
+	// Incremental: user 1 goes inactive.
 	out = pt.applyPublish(&presencestream.Publish{
 		PublishType:     presencestream.PublishTypeIncremental,
 		PresenceUpdates: []presencestream.Update{upd(1, false, 0)},
-	}, 99, t1)
-	if st := out[1]; st.Presence != event.PresenceOffline || st.StatusMsg != "last seen 2025-09-19T13:53:20Z" {
+	}, 99)
+	if st := out[1]; st != offlineOnly {
 		t.Errorf("incremental: %+v", out)
 	}
 	if _, ok := out[2]; ok {
 		t.Errorf("incremental publish must not touch other users: %+v", out)
 	}
 	// Full snapshot without user 2 marks them offline.
-	out = pt.applyPublish(&presencestream.Publish{PublishType: presencestream.PublishTypeFull}, 99, t1)
-	if st := out[2]; st.Presence != event.PresenceOffline || st.StatusMsg != "last seen 2025-09-19T13:53:20Z" {
+	out = pt.applyPublish(&presencestream.Publish{PublishType: presencestream.PublishTypeFull}, 99)
+	if st := out[2]; st != offlineOnly {
 		t.Errorf("full: %+v", out)
 	}
 }
 
 func TestTrackerCloseAll(t *testing.T) {
 	var pt presenceTracker
-	t0 := time.Unix(1758290000, 0)
-	pt.applyPublish(&presencestream.Publish{PresenceUpdates: []presencestream.Update{upd(5, true, 0)}}, 0, t0)
-	pt.applyLS(6, presence.State{Presence: event.PresenceOnline}, t0)
+	pt.applyPublish(&presencestream.Publish{PresenceUpdates: []presencestream.Update{upd(5, true, 0)}}, 0)
+	pt.applyLS(6, presence.State{Presence: event.PresenceOnline})
 	out := pt.closeAll()
-	if len(out) != 2 || out[5].Presence != event.PresenceOffline || out[6].StatusMsg != "last seen 2025-09-19T13:53:20Z" {
+	if len(out) != 2 || out[5] != offlineOnly || out[6] != offlineOnly {
 		t.Errorf("closeAll: %+v", out)
 	}
 	if out = pt.closeAll(); len(out) != 0 {

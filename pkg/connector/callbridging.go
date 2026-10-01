@@ -1304,7 +1304,7 @@ func (s *callSession) relayVideoTrack(tr *webrtc.TrackRemote, from, to *callbrid
 	}()
 	var stats callbridge.RelayStats
 	rlog := s.log.With().Str("from", from.Name).Str("to", to.Name).Str("codec", tr.Codec().MimeType).Logger()
-	err := callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), to.LocalVideo, &stats, rlog)
+	err := relayLegVideo(s.ctx, from, tr, tr, to.LocalVideo, &stats, rlog)
 	rlog.Info().AnErr("relay_err", err).
 		Uint64("forwarded", stats.Forwarded.Load()).
 		Uint64("dropped", stats.Dropped.Load()).

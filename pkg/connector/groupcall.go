@@ -1248,6 +1248,7 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 	rtc := p.rtc
 	p.tracks[tr.ID()] = true
 	crypt := g.crypt
+	leg := g.leg
 	g.lock.Unlock()
 	if crypt != nil {
 		g.relayDecrypted(crypt, p, rtc, tr, log)
@@ -1261,11 +1262,12 @@ func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
 			return
 		}
 		g.forwardKeyframes(rtc, tr, screen)
-		err = callbridge.RelayVideo(g.ctx, tr, uint8(tr.PayloadType()), w, &stats, log)
+		err = relayLegVideo(g.ctx, leg, tr, tr, w, &stats, log)
 	} else {
 		err = callbridge.Relay(g.ctx, tr, uint8(tr.PayloadType()), rtc.AudioWriter(), &stats, log)
 	}
-	log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Participant relay stopped")
+	log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).
+		Uint64("dropped", stats.Dropped.Load()).Msg("Participant relay stopped")
 }
 
 // forwardKeyframes asks Messenger for keyframes of a participant's video: a few right away (nobody
@@ -1370,11 +1372,12 @@ func (g *groupCall) relayDecrypted(crypt *groupE2ee, p *groupParticipant, rtc *c
 			}
 		}
 		g.forwardKeyframes(rtc, tr, screen)
-		err = callbridge.RelayVideoTransformed(g.ctx, tr, uint8(tr.PayloadType()), tr.Codec().MimeType, w, xf, onLoss, &stats, log)
+		err = relayLegVideoTransformed(g.ctx, leg, tr, tr, tr.Codec().MimeType, w, xf, onLoss, &stats, log)
 	} else {
 		err = callbridge.RelayAudioTransformed(g.ctx, tr, uint8(tr.PayloadType()), rtc.AudioWriter(), xf, &stats, log)
 	}
-	log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Uint64("frames", stats.Frames.Load()).
+	log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).
+		Uint64("dropped", stats.Dropped.Load()).Uint64("frames", stats.Frames.Load()).
 		Uint64("failed", stats.Failed.Load()).Uint64("lost_packets", stats.LostPackets.Load()).Msg("Participant relay stopped")
 }
 

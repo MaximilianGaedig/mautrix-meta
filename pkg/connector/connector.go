@@ -60,6 +60,7 @@ func (m *MetaConnector) Start(ctx context.Context) error {
 	}
 	m.startPresence(ctx)
 	m.registerCallEventHandlers()
+	m.registerCallActiveRoute()
 	return nil
 }
 

@@ -314,3 +314,17 @@ func TestRTCVideoCodecFollowsElementCall(t *testing.T) {
 		t.Errorf("VP8-only offer: %q, want VP8 rather than no video", got)
 	}
 }
+
+// A Messenger peer that offers only VP8 gets a VP8 leg, and Element Call sends H264: the bridge has
+// to ask LiveKit for the VP8 backup, or its own camera relay refuses every track as the wrong codec.
+func TestRTCJoinCodec(t *testing.T) {
+	if got := rtcJoinCodec(webrtc.MimeTypeVP8); got != webrtc.MimeTypeVP8 {
+		t.Errorf("VP8 leg joins asking for %q, want VP8", got)
+	}
+	// H264 is what arrives anyway; restricting would only lose retransmissions. No video: nothing to ask.
+	for _, leg := range []string{webrtc.MimeTypeH264, ""} {
+		if got := rtcJoinCodec(leg); got != "" {
+			t.Errorf("leg %q joins asking for %q, want no restriction", leg, got)
+		}
+	}
+}

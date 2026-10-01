@@ -33,7 +33,7 @@ cache_connection_state: false
 send_presence_on_typing: false
 # Bridge contacts' online status ("Active now" / "Active 5m ago") to Matrix
 # presence on the ghosts. Active contacts are shown as online, everyone else as
-# offline with status_msg "last seen <RFC3339 UTC time>" when Meta shares it.
+# offline. Only presence is set, never a status message (see presence_last_active).
 # Only Facebook and Messenger logins are supported. The bridge reports your own
 # account as idle on this stream, like a Messenger tab in the background.
 presence_bridging: true

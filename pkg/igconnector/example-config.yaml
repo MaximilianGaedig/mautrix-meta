@@ -29,6 +29,12 @@ disable_xma_always: false
 disable_typing: false
 # Should view-once messages be disabled entirely?
 disable_view_once: false
+# Bridge your contacts' presence to Matrix. Requires a homeserver that accepts
+# presence on the ghosts. Only presence is set, never a status message.
+# Instagram's own "Active now" is not bridged (how its web client asks for it is
+# not known): a contact is shown online for 5 minutes after they send a message,
+# type or read yours, and offline after that. Nothing extra is asked of Instagram.
+presence_bridging: true
 # Log raw Bloks payloads and login responses even at debug level, with any user identifiers or credentials redacted.
 log_redacted_login_responses: false
 

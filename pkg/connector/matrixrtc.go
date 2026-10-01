@@ -239,7 +239,7 @@ func (s *callSession) joinRTC() error {
 	if err != nil {
 		return err
 	}
-	leg, err := callbridge.JoinRTC(s.ctx, callbridge.RTCLegConfig{URL: url, Token: token, Log: s.log})
+	leg, err := callbridge.JoinRTC(s.ctx, callbridge.RTCLegConfig{URL: url, Token: token, Log: s.log, VideoCodec: rtcJoinCodec(s.videoCodec)})
 	if err != nil {
 		return err
 	}
@@ -505,7 +505,7 @@ func (s *callSession) relayMetaScreenToRTC(tr *webrtc.TrackRemote, metaLeg *call
 	}()
 	rlog.Info().Msg("Relaying Messenger's shared screen to the Matrix call")
 	var stats callbridge.RelayStats
-	err = callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), dst, &stats, rlog)
+	err = relayLegVideo(s.ctx, metaLeg, tr, tr, dst, &stats, rlog)
 	rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Screen relay stopped")
 }
 
@@ -547,6 +547,19 @@ const rtcCameraCodec = webrtc.MimeTypeH264
 // because the web client offered it too left the two legs on different codecs and no video.
 func rtcVideoCodec(offerSDP string) string {
 	return callbridge.PickVideoCodecPreferring(offerSDP, rtcCameraCodec)
+}
+
+// rtcJoinCodec is the one video codec the bridge asks LiveKit for when it joins a call, or "" for
+// whatever the publisher sends first. Element Call sends H264 and keeps a VP8 backup; a Messenger
+// leg that could only agree VP8 has to ask for that backup, or the two legs speak different codecs
+// and nothing can be relayed. An H264 leg asks for nothing: restricting the join costs
+// retransmissions (the restricted codec list carries no RTX), which is not worth paying where the
+// first choice already matches.
+func rtcJoinCodec(legCodec string) string {
+	if strings.EqualFold(legCodec, webrtc.MimeTypeVP8) {
+		return webrtc.MimeTypeVP8
+	}
+	return ""
 }
 
 // relayRTCVideoToMeta sends the Matrix user's camera to Messenger: turning video on in an audio call
