@@ -28,6 +28,9 @@ func makeFacebookEndpoints(host string) map[string]string {
 		"media_upload":   baseURL + "/ajax/mercury/upload.php?",
 		"web_push":       baseURL + "/push/register/service_worker/",
 
+		// MercuryServerURIs of the web client: the endpoints of facebook.com's older chat code.
+		"mercury_change_read_status": baseURL + "/ajax/mercury/change_read_status.php",
+
 		"dgw_lightspeed":       dgwBase + "/ws/lightspeed",
 		"dgw_streamcontroller": dgwBase + "/ws/streamcontroller",
 		"dgw_rpsignaling":      dgwBase + "/ws/rpsignaling",

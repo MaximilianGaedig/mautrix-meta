@@ -54,7 +54,7 @@ func (m *MetaConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 }
 
 func (m *MetaConnector) GetBridgeInfoVersion() (info, caps int) {
-	return 1, 19
+	return 1, 20
 }
 
 const MaxTextLength = 20000
@@ -70,7 +70,7 @@ func supportedIfFFmpeg() event.CapabilitySupportLevel {
 }
 
 func capID() string {
-	base := "fi.mau.meta.capabilities.2026_09_30"
+	base := "fi.mau.meta.capabilities.2026_10_02"
 	if ffmpeg.Supported() {
 		return base + "+ffmpeg"
 	}
@@ -174,6 +174,8 @@ var metaCaps = &event.RoomFeatures{
 	// Neither network has a way of sharing a location, so the place is sent as text with a link to a map.
 	LocationMessage: event.CapLevelPartialSupport,
 	DeleteChat:      true,
+	// Encrypted chats take this back below, see HandleMarkedUnread.
+	MarkAsUnread: true,
 }
 
 // withPolls says that a room takes part in Messenger polls. Votes go both ways, but a poll can only
@@ -218,6 +220,7 @@ func init() {
 	metaCapsWithE2E.State = event.StateFeatureMap{
 		event.StateBeeperDisappearingTimer.Type: {Level: event.CapLevelFullySupported},
 	}
+	metaCapsWithE2E.MarkAsUnread = false
 	metaCapsWithE2EGroup = metaCapsWithE2E.Clone()
 	metaCapsWithE2EGroup.ID += "+group"
 	metaCapsWithE2EGroup.MemberActions = map[event.MemberAction]event.CapabilitySupportLevel{
