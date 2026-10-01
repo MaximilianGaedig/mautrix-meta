@@ -41,6 +41,10 @@ presence_bridging: true
 # 1:1 chats with. Messenger web asks only about the chats it shows, so this is a different request
 # pattern from the official client: one list of every group member, re-sent every 2.5 minutes.
 presence_group_members: false
+# Tell the homeserver when Meta says someone was last active ("Active 2h ago"), which Matrix
+# presence has no field for. Only a homeserver that keeps an activity log takes it (tuwunel's
+# im.mxg.activity); on any other the bridge finds out on its first try and stops.
+presence_last_active: false
 # Show Messenger calls as one line in the chat that follows the call: it appears when the call
 # starts ("Incoming voice call") and is edited into how it went ("Missed voice call",
 # "Voice call, 1:14"). The text Messenger writes about a call in the chat is not bridged

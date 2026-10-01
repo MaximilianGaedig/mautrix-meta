@@ -34,7 +34,10 @@ type Config struct {
 	SendPresenceOnTyping bool `yaml:"send_presence_on_typing"`
 	PresenceBridging     bool `yaml:"presence_bridging"`
 	// PresenceGroupMembers asks for everyone in your groups too, not only 1:1 partners.
-	PresenceGroupMembers  bool `yaml:"presence_group_members"`
+	PresenceGroupMembers bool `yaml:"presence_group_members"`
+	// PresenceLastActive reports when Meta says someone was last active to a homeserver that keeps
+	// an activity log.
+	PresenceLastActive    bool `yaml:"presence_last_active"`
 	CallNotices           bool `yaml:"call_notices"`
 	CallBridging          bool `yaml:"call_bridging"`
 	CallBridgingMatrixRTC bool `yaml:"call_bridging_matrixrtc"`
@@ -90,6 +93,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "send_presence_on_typing")
 	helper.Copy(up.Bool, "presence_bridging")
 	helper.Copy(up.Bool, "presence_group_members")
+	helper.Copy(up.Bool, "presence_last_active")
 	helper.Copy(up.Bool, "call_notices")
 	helper.Copy(up.Bool, "call_bridging")
 	helper.Copy(up.Bool, "call_bridging_matrixrtc")

@@ -235,3 +235,42 @@ func TestActivityMakesOnlineForAWhile(t *testing.T) {
 		t.Fatalf("old activity sent: %+v", s)
 	}
 }
+
+// Messenger repeats a user's last-active time in every snapshot; the homeserver wants it once.
+func TestSeenReporterIsNews(t *testing.T) {
+	r := NewSeenReporter(nil)
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-time.Hour)
+	if !r.isNews("1", at, now) {
+		t.Fatal("a first last-active time is news")
+	}
+	if r.isNews("1", at, now) || r.isNews("1", at.Add(300*time.Millisecond), now) {
+		t.Error("the same time again is not")
+	}
+	if r.isNews("1", at.Add(-time.Minute), now) {
+		t.Error("an older time is not")
+	}
+	if !r.isNews("1", at.Add(time.Minute), now) {
+		t.Error("a later time is")
+	}
+	if !r.isNews("2", at, now) {
+		t.Error("another user's time is their own")
+	}
+	if r.isNews("3", time.Time{}, now) || r.isNews("3", now.Add(time.Hour), now) || r.isNews("", at, now) {
+		t.Error("no time, a time that hasn't come and nobody are not news")
+	}
+}
+
+func TestSeenReporterStopsWhenUnsupported(t *testing.T) {
+	calls := 0
+	r := NewSeenReporter(func(context.Context, string, time.Time) error {
+		calls++
+		return ErrSeenUnsupported
+	})
+	r.Note("1", time.Now().Add(-time.Hour))
+	r.Run(context.Background())
+	r.Note("2", time.Now().Add(-time.Hour))
+	if calls != 1 || len(r.queue) != 0 {
+		t.Errorf("asked %d times, %d still queued", calls, len(r.queue))
+	}
+}

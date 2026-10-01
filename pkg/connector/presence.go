@@ -300,6 +300,10 @@ func (m *MetaConnector) startPresence(ctx context.Context) {
 	}, presence.GhostSender(m.Bridge))
 	log := m.Bridge.Log.With().Str("component", "presence").Logger()
 	go m.presence.Run(log.WithContext(context.WithoutCancel(ctx)))
+	if m.Config.PresenceLastActive {
+		m.seen = presence.NewSeenReporter(presence.GhostSeenSender(m.Bridge))
+		go m.seen.Run(log.WithContext(context.WithoutCancel(ctx)))
+	}
 }
 
 func (m *MetaClient) presenceEnabled() bool {
@@ -377,6 +381,15 @@ func (m *MetaClient) handlePresencePublish(evt *messagix.PresenceEvent) {
 		return
 	}
 	m.sendPresenceStates(m.presenceTracker.applyPublish(evt.Publish, m.selfFBID(), time.Now()))
+	// "Offline" is all Matrix presence can say of someone who has come and gone; when they were
+	// last here goes to the homeserver's activity log, where it keeps one.
+	self := m.selfFBID()
+	for i := range evt.Publish.PresenceUpdates {
+		u := &evt.Publish.PresenceUpdates[i]
+		if id := int64(u.UserID); id > 0 && id != self {
+			m.Main.seen.Note(string(metaid.MakeUserID(id)), u.LastActive())
+		}
+	}
 }
 
 func (m *MetaClient) handlePresenceStreamClosed() {
@@ -408,6 +421,9 @@ func (m *MetaClient) handleTablePresence(ctx context.Context, tbl *table.LSTable
 			continue
 		}
 		st := mapLSContactPresence(row, now)
+		if row.LastActiveTimestampMs > 0 {
+			m.Main.seen.Note(string(metaid.MakeUserID(row.ContactId)), time.UnixMilli(row.LastActiveTimestampMs))
+		}
 		m.presenceTracker.applyLS(row.ContactId, st, now)
 		m.Main.presence.Update(string(metaid.MakeUserID(row.ContactId)), st)
 	}
