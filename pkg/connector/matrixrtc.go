@@ -450,6 +450,13 @@ func (s *callSession) relayMetaVideoToRTC(metaLeg *callbridge.Leg, rtc *callbrid
 		if err != nil {
 			return
 		}
+		s.lock.Lock()
+		screen := s.peerScreens[tr.ID()]
+		s.lock.Unlock()
+		if screen {
+			go s.relayMetaScreenToRTC(tr, metaLeg, rtc)
+			continue
+		}
 		if dst == nil {
 			if dst, err = rtc.AddVideoTrack(tr.Codec().MimeType); err != nil {
 				s.log.Warn().Err(err).Msg("Failed to publish Messenger video")
@@ -460,11 +467,42 @@ func (s *callSession) relayMetaVideoToRTC(metaLeg *callbridge.Leg, rtc *callbrid
 		s.metaVideoSSRC = tr.SSRC()
 		s.lock.Unlock()
 		s.requestMetaKeyframeBurst()
-		var stats callbridge.RelayStats
-		rlog := s.log.With().Str("from", "messenger").Str("codec", tr.Codec().MimeType).Logger()
-		err = callbridge.RelayVideoWith(s.ctx, tr, uint8(tr.PayloadType()), dst, &stats, rlog, rw)
-		rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Video relay stopped")
+		// On its own goroutine, so the next track is taken as it comes: a screen shared beside the
+		// camera is a second video track, and waiting for the camera's to end first meant the leg
+		// dropped it for want of anyone to take it.
+		go func(tr *webrtc.TrackRemote, dst callbridge.RTPWriter) {
+			var stats callbridge.RelayStats
+			rlog := s.log.With().Str("from", "messenger").Str("codec", tr.Codec().MimeType).Logger()
+			err := callbridge.RelayVideoWith(s.ctx, tr, uint8(tr.PayloadType()), dst, &stats, rlog, rw)
+			rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Video relay stopped")
+		}(tr, dst)
 	}
+}
+
+// relayMetaScreenToRTC publishes a screen the Messenger side shares into the Matrix call as a screen
+// share of its ghost's, beside the camera.
+func (s *callSession) relayMetaScreenToRTC(tr *webrtc.TrackRemote, metaLeg *callbridge.Leg, rtc *callbridge.RTCLeg) {
+	rlog := s.log.With().Str("from", "messenger").Str("what", "screen").Str("codec", tr.Codec().MimeType).Logger()
+	dst, err := rtc.AddScreenTrack(tr.Codec().MimeType)
+	if err != nil {
+		rlog.Warn().Err(err).Msg("Failed to publish Messenger's shared screen")
+		return
+	}
+	ssrc := tr.SSRC()
+	rtc.OnScreenKeyframeRequest(func() { metaLeg.RequestKeyframe(ssrc) })
+	go func() {
+		for _, d := range []time.Duration{0, 600 * time.Millisecond, time.Second} {
+			time.Sleep(d)
+			if s.ctx.Err() != nil {
+				return
+			}
+			metaLeg.RequestKeyframe(ssrc)
+		}
+	}()
+	rlog.Info().Msg("Relaying Messenger's shared screen to the Matrix call")
+	var stats callbridge.RelayStats
+	err = callbridge.RelayVideo(s.ctx, tr, uint8(tr.PayloadType()), dst, &stats, rlog)
+	rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Screen relay stopped")
 }
 
 // requestMetaKeyframe asks Messenger for a keyframe of its camera (at most every 500 ms).
@@ -804,9 +842,16 @@ func (s *callSession) relayRTCScreenToMeta(rtc *callbridge.RTCLeg, metaLeg *call
 		var stats callbridge.RelayStats
 		err = callbridge.RelayVideoWith(s.ctx, tr, uint8(tr.PayloadType()), metaLeg.LocalScreen, &stats, rlog, rw)
 		rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Screen relay stopped")
-		// The share ended: Messenger is told, or it keeps the last frame on screen.
+		// The share ended: its track leaves the connection, as the web client's does. Left there and
+		// only marked off, Messenger kept the last frame up with a spinner over it.
 		s.setScreenOn(false)
-		s.resendMetaMediaState()
+		if s.ctx.Err() != nil {
+			return
+		}
+		if err = s.offerMetaTrack("screen share end", func(leg *callbridge.Leg) error { return leg.RemoveScreenTrack() }); err != nil {
+			rlog.Err(err).Msg("Failed to take the shared screen off the Messenger call")
+			s.resendMetaMediaState()
+		}
 	}
 }
 

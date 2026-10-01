@@ -652,8 +652,16 @@ func (g *groupCall) relayUserScreen(rtc *callbridge.RTCLeg) {
 			err = callbridge.RelayVideo(g.ctx, tr, uint8(tr.PayloadType()), leg.LocalScreen, &stats, log)
 			log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Matrix screen relay stopped")
 		}
+		// The share ended: its track leaves the connection, as the web client's does. Left there and
+		// only marked off, Messenger kept the last frame up with a spinner over it.
 		g.setScreenOn(false)
-		g.resendOwnMediaState()
+		if g.ctx.Err() != nil {
+			return
+		}
+		if err = g.offerOwnTrack(leg, "screen share end", leg.RemoveScreenTrack); err != nil {
+			log.Err(err).Msg("Failed to take the shared screen off the Messenger call")
+			g.resendOwnMediaState()
+		}
 	}
 }
 

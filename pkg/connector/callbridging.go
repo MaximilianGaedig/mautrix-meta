@@ -390,6 +390,8 @@ type callSession struct {
 	metaVideoSSRC    webrtc.SSRC
 	metaKeyframeAt   time.Time
 	peerVideoEnabled map[string]bool
+	// peerScreens are the Messenger track ids labelled as a shared screen.
+	peerScreens map[string]bool
 
 	endOnce sync.Once
 }
@@ -573,7 +575,9 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 			Int32("paused_up", ti.PausedUplink).
 			Int32("paused_down", ti.PausedDownlink).
 			Str("owner", ti.Owner).
-			Int32("label", ti.Label))
+			Int32("label", ti.Label).
+			Int32("video_content", ti.CustomVideoContentType).
+			Str("name", ti.Name))
 	}
 	// Messenger pauses a camera that's turned off and resumes the same track: a keyframe makes the
 	// picture come back instead of freezing on the last frame.
@@ -583,6 +587,13 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		s.peerVideoEnabled = map[string]bool{}
 	}
 	for id, ti := range smu.MediaStatus {
+		if ti.Label == rtcsignal.TrackLabelScreen {
+			// A track of its own beside the camera: told apart from it when its media arrives.
+			if s.peerScreens == nil {
+				s.peerScreens = map[string]bool{}
+			}
+			s.peerScreens[id] = true
+		}
 		if ti.Label != rtcsignal.TrackLabelVideo {
 			continue
 		}
