@@ -15,6 +15,7 @@ RUN apk add --no-cache ffmpeg su-exec ca-certificates olm bash jq yq-go curl
 
 COPY --from=builder /build/mautrix-meta /usr/bin/mautrix-meta
 COPY --from=builder /build/docker-run.sh /docker-run.sh
+COPY --from=builder /build/docker-pre-update.sh /docker-pre-update.sh
 VOLUME /data
 
 CMD ["/docker-run.sh"]

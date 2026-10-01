@@ -10,6 +10,7 @@ RUN apk add --no-cache ffmpeg su-exec ca-certificates bash jq curl yq-go
 ARG EXECUTABLE=./mautrix-meta
 COPY $EXECUTABLE /usr/bin/mautrix-meta
 COPY ./docker-run.sh /docker-run.sh
+COPY ./docker-pre-update.sh /docker-pre-update.sh
 ENV BRIDGEV2=1
 VOLUME /data
 WORKDIR /data
