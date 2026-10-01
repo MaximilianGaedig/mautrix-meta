@@ -125,7 +125,7 @@ func DefaultResponseBody(req *Message) Body {
 }
 
 // WebUserCapabilities is the userCapabilities JSON of the web client.
-const WebUserCapabilities = `{"AddParticipantEnabled":false,"GROUP_COWATCH":true,"MultipleVideoStreamsAllowed":true,"MW_AV_ESCALATION":true,"canApproveCollaborationSpaceJoinRequests":true,"cowatch":true,"screen_sharing":false,"sctpSecondPc":false}`
+const WebUserCapabilities = `{"AddParticipantEnabled":false,"GROUP_COWATCH":true,"MultipleVideoStreamsAllowed":true,"MW_AV_ESCALATION":true,"canApproveCollaborationSpaceJoinRequests":true,"cowatch":true,"screen_sharing":true,"sctpSecondPc":false}`
 
 // JoiningContextTopic is the app message topic carrying the joining context.
 const JoiningContextTopic = "joining_context"

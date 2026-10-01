@@ -351,6 +351,8 @@ type callSession struct {
 	metaUpgrading  bool // Messenger leg being upgraded to video for Element's camera
 	// sentMediaState is the microphone and camera state last passed to Messenger (sendMetaMediaState).
 	sentMediaState *[2]bool
+	// screenOn is whether the Matrix user's shared screen is being relayed to Messenger.
+	screenOn       bool
 	metaPrepare    sync.Once
 	metaICEOnce    sync.Once
 	metaICE        []webrtc.ICEServer
@@ -666,7 +668,8 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 				Msg("Failed to answer Messenger renegotiation")
 			break
 		}
-		s.log.Info().Msg("Answered Messenger renegotiation")
+		// With the offer's shape: what a phone adds when it shares its screen is only visible here.
+		callbridge.LogSDPShape(s.log.Info(), sd.SDP).Bool("leg_plan_b", leg.IsPlanB()).Msg("Answered Messenger renegotiation")
 		resp.Answer = &rtcsignal.SessionDescription{SDP: answer}
 		// In MatrixRTC calls the video relay is already waiting for Messenger's camera.
 		if s.videoCodec == "" && offersVideo && !s.rtcMode {
@@ -996,6 +999,10 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 	if s.m.matrixRTCEnabled() {
 		s.lock.Lock()
 		s.rtcMode = true
+		legacyCodec := s.videoCodec
+		if legacyCodec != "" {
+			s.videoCodec = rtcVideoCodec(offerSDP)
+		}
 		s.lock.Unlock()
 		if err = s.ringRTC(); err != nil {
 			// Fall back to a legacy call, which Element Web still answers.
@@ -1003,6 +1010,7 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 			s.leaveRTC(s.ctx)
 			s.lock.Lock()
 			s.rtcMode = false
+			s.videoCodec = legacyCodec
 			s.lock.Unlock()
 		}
 	}
@@ -1901,11 +1909,10 @@ func (s *callSession) sendMetaMediaState(audioOn, videoOn bool) {
 		s.log.Warn().Err(err).Msg("No media version for the Matrix side's camera and microphone state")
 		return
 	}
-	tracks := map[string]rtcsignal.TrackInfo{leg.TrackID: {Enabled: audioOn, Label: rtcsignal.TrackLabelAudio}}
-	if leg.LocalVideo != nil {
-		tracks[leg.VideoTrackID] = rtcsignal.TrackInfo{Enabled: videoOn, Label: rtcsignal.TrackLabelVideo}
-	}
-	if _, err = s.cb.sig.Request(s.ctx, cc.NewClientMediaUpdate(version, tracks, "")); err != nil {
+	s.lock.Lock()
+	screenOn := s.screenOn
+	s.lock.Unlock()
+	if _, err = s.cb.sig.Request(s.ctx, cc.NewClientMediaUpdate(version, metaTracks(leg, audioOn, videoOn, screenOn), "")); err != nil {
 		s.log.Err(err).Msg("Failed to pass the Matrix side's camera and microphone state to Messenger")
 		return
 	}

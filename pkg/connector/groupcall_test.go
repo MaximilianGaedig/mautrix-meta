@@ -203,3 +203,62 @@ func TestGroupCallTrackWaitsForItsOwner(t *testing.T) {
 		t.Errorf("owner from the stream id = %q", got)
 	}
 }
+
+// A screen shared in Element went nowhere: the bridge had a camera track towards Messenger and no
+// other. It is a track of its own, labelled as a screen, and off when nothing is being shared - so
+// Messenger shows the share and takes it down again instead of keeping its last frame.
+func TestSharedScreenIsATrackOfItsOwn(t *testing.T) {
+	cb := &callBridge{log: zerolog.Nop(), m: &MetaClient{UserLogin: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "100"}}}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "557"}}}
+	g, err := cb.newGroupCall(context.Background(), portal, "557", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leg := &callbridge.Leg{TrackID: "aud", VideoTrackID: "vid", ScreenTrackID: "scr"}
+	if got := metaTracks(leg, true, true, true); len(got) != 1 {
+		t.Fatalf("before anything is shared: %v, want only our audio", got)
+	}
+	leg.LocalScreen, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "scr", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A 1:1 call: the screen beside the microphone, with no camera at all.
+	one := metaTracks(leg, true, false, true)
+	if s := one["scr"]; s.Label != rtcsignal.TrackLabelScreen || !s.Enabled {
+		t.Errorf("1:1 screen = %+v, want an enabled screen track", s)
+	}
+	if _, camera := one["vid"]; camera {
+		t.Errorf("a camera was reported that isn't there: %v", one)
+	}
+	if s := metaTracks(leg, true, false, false)["scr"]; s.Enabled {
+		t.Errorf("the screen stays on after the share ended: %+v", s)
+	}
+
+	// A group call: the same, owned by us.
+	g.setScreenOn(true)
+	if s := g.ownTracks(leg, true, false)["scr"]; s.Label != rtcsignal.TrackLabelScreen || !s.Enabled || s.Owner != "100" {
+		t.Errorf("group screen = %+v, want an enabled screen track owned by us", s)
+	}
+	g.setScreenOn(false)
+	if s := g.ownTracks(leg, true, false)["scr"]; s.Enabled {
+		t.Errorf("the group screen stays on after the share ended: %+v", s)
+	}
+}
+
+// Messenger's web client offers VP8 and H264, its phone apps only H264, and Element Call sends H264.
+// Taking VP8 because it was offered left the two legs on different codecs: no video from Element.
+func TestRTCVideoCodecFollowsElementCall(t *testing.T) {
+	web := "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 108\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:108 H264/90000\r\na=sendrecv\r\n"
+	if got := rtcVideoCodec(web); got != webrtc.MimeTypeH264 {
+		t.Errorf("web offer: %q, want H264", got)
+	}
+	phone := "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 108\r\na=rtpmap:108 H264/90000\r\na=sendrecv\r\n"
+	if got := rtcVideoCodec(phone); got != webrtc.MimeTypeH264 {
+		t.Errorf("phone offer: %q, want H264", got)
+	}
+	old := "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 VP8/90000\r\na=sendrecv\r\n"
+	if got := rtcVideoCodec(old); got != webrtc.MimeTypeVP8 {
+		t.Errorf("VP8-only offer: %q, want VP8 rather than no video", got)
+	}
+}

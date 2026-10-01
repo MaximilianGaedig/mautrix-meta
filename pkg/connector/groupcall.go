@@ -119,6 +119,7 @@ type groupCall struct {
 	subscribed     map[string]bool   // video track ids with a TRACK subscription
 	screens        map[string]bool   // track ids that are a participant's shared screen
 	sentMediaState *[2]bool          // the Matrix user's microphone and camera state last told to the SFU
+	screenOn       bool              // whether the Matrix user's shared screen is being sent to the SFU
 	present        map[string]bool   // Messenger participants connecting or connected
 	hadOthers      bool              // whether anyone from Messenger has been in the call
 	participants   map[string]*groupParticipant
@@ -394,6 +395,7 @@ func (g *groupCall) joinRTC(p *groupParticipant) error {
 		leg.OnPeers(g.onRTCPeers)
 		go g.relayUserAudio(leg)
 		go g.relayUserVideo(leg)
+		go g.relayUserScreen(leg)
 		leg.OnMediaState(func(audioOn, videoOn bool) { go g.sendOwnMediaState(audioOn, videoOn) })
 	}
 	resp, err := cli.SendStateEvent(g.ctx, g.portal.MXID, evtCallMember, rtcStateKey(cli.UserID, rtcDeviceID),
@@ -590,8 +592,97 @@ func (g *groupCall) relayUserVideo(rtc *callbridge.RTCLeg) {
 	}
 }
 
+// relayUserScreen sends the Matrix user's shared screen to Messenger's SFU, as a track of its own
+// beside the camera, labelled as a screen - how Messenger's web client shares one. Each new share
+// (Element Call publishes a new track each time) goes into the same outgoing track, which is
+// switched off in between so Messenger doesn't keep the last frame up.
+func (g *groupCall) relayUserScreen(rtc *callbridge.RTCLeg) {
+	for g.ctx.Err() == nil {
+		tr, err := rtc.RemoteScreen(g.ctx)
+		if err != nil {
+			return
+		}
+		var leg *callbridge.Leg
+		var crypt *groupE2ee
+		for g.ctx.Err() == nil {
+			g.lock.Lock()
+			l, c, joined := g.leg, g.crypt, g.joined
+			g.lock.Unlock()
+			if l != nil && joined {
+				leg, crypt = l, c
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if leg == nil {
+			return
+		}
+		mime := tr.Codec().MimeType
+		log := g.log.With().Str("from", "matrixrtc").Str("what", "screen").Str("codec", mime).Logger()
+		g.setScreenOn(true)
+		if leg.LocalScreen == nil {
+			if err = g.offerOwnTrack(leg, "screen share", func() error { return leg.AddScreenTrack(mime) }); err != nil {
+				log.Err(err).Msg("Failed to start sharing the Matrix user's screen with Messenger")
+				g.setScreenOn(false)
+				continue
+			}
+		} else if have := leg.LocalScreen.Codec().MimeType; !strings.EqualFold(have, mime) {
+			log.Warn().Str("messenger_codec", have).Msg("The shared screen's codec changed, not relaying it")
+			g.setScreenOn(false)
+			continue
+		} else {
+			g.resendOwnMediaState()
+		}
+		leg.OnScreenKeyframeRequest(func() { rtc.RequestKeyframe(tr) })
+		go func() {
+			for _, d := range []time.Duration{0, 600 * time.Millisecond, time.Second} {
+				time.Sleep(d)
+				rtc.RequestKeyframe(tr)
+			}
+		}()
+		log.Info().Msg("Relaying the Matrix user's shared screen to Messenger")
+		if crypt != nil {
+			var stats callbridge.FrameRelayStats
+			xf := crypt.encryptVideoTransform(mime, log)
+			err = callbridge.RelayVideoTransformed(g.ctx, tr, uint8(tr.PayloadType()), mime, leg.LocalScreen, xf, func() { rtc.RequestKeyframe(tr) }, &stats, log)
+			log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Uint64("frames", stats.Frames.Load()).
+				Msg("Matrix screen relay stopped")
+		} else {
+			var stats callbridge.RelayStats
+			err = callbridge.RelayVideo(g.ctx, tr, uint8(tr.PayloadType()), leg.LocalScreen, &stats, log)
+			log.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Matrix screen relay stopped")
+		}
+		g.setScreenOn(false)
+		g.resendOwnMediaState()
+	}
+}
+
+func (g *groupCall) setScreenOn(on bool) {
+	g.lock.Lock()
+	g.screenOn = on
+	g.lock.Unlock()
+}
+
+// resendOwnMediaState tells the SFU our tracks' state again after the shared screen came or went,
+// which the microphone and camera state alone doesn't show as a change.
+func (g *groupCall) resendOwnMediaState() {
+	g.lock.Lock()
+	audioOn, videoOn := true, false
+	if g.sentMediaState != nil {
+		audioOn, videoOn = g.sentMediaState[0], g.sentMediaState[1]
+	}
+	g.sentMediaState = nil
+	g.lock.Unlock()
+	g.sendOwnMediaState(audioOn, videoOn)
+}
+
 // offerOwnVideo adds a video track to the SFU connection and offers it, with our tracks' state.
 func (g *groupCall) offerOwnVideo(leg *callbridge.Leg, mime string) error {
+	return g.offerOwnTrack(leg, "video", func() error { return leg.AddVideoTrack(mime) })
+}
+
+// offerOwnTrack adds a track to the SFU connection and offers it, with our tracks' state.
+func (g *groupCall) offerOwnTrack(leg *callbridge.Leg, what string, add func() error) error {
 	id := g.m.callIdentity()
 	g.lock.Lock()
 	cc := g.cc
@@ -599,22 +690,30 @@ func (g *groupCall) offerOwnVideo(leg *callbridge.Leg, mime string) error {
 	if id == nil || cc == nil {
 		return errors.New("not in the Messenger call")
 	}
-	if err := leg.AddVideoTrack(mime); err != nil {
-		return fmt.Errorf("add video track: %w", err)
+	if err := add(); err != nil {
+		return fmt.Errorf("add %s track: %w", what, err)
 	}
 	offer, err := leg.Renegotiate()
 	if err == nil {
 		offer, err = metacall.PrepareLocalSDP(offer, id, true)
 	}
 	if err != nil {
-		return fmt.Errorf("create video offer: %w", err)
+		return fmt.Errorf("create %s offer: %w", what, err)
 	}
 	version, err := callbridge.SDPVersion(offer)
 	if err != nil {
 		leg.RollbackOffer()
-		return fmt.Errorf("video offer version: %w", err)
+		return fmt.Errorf("%s offer version: %w", what, err)
 	}
-	resp, err := g.cb.sig.Request(g.ctx, cc.NewClientMediaUpdate(version, g.ownTracks(leg, true, true), offer))
+	audioOn, videoOn := true, leg.LocalVideo != nil
+	g.lock.Lock()
+	if g.sentMediaState != nil {
+		audioOn = g.sentMediaState[0]
+		// The camera being added is on; one that was there keeps the state the SFU last heard.
+		videoOn = what == "video" || g.sentMediaState[1]
+	}
+	g.lock.Unlock()
+	resp, err := g.cb.sig.Request(g.ctx, cc.NewClientMediaUpdate(version, g.ownTracks(leg, audioOn, videoOn), offer))
 	if err != nil {
 		leg.RollbackOffer()
 		return fmt.Errorf("CLIENT_MEDIA_UPDATE (version %d): %w", version, err)
@@ -622,13 +721,13 @@ func (g *groupCall) offerOwnVideo(leg *callbridge.Leg, mime string) error {
 	cmu := resp.Body.ClientMediaUpdateResponse
 	if cmu == nil || cmu.Answer == nil || cmu.Answer.SDP == "" {
 		// The SFU's answer comes as a SERVER_MEDIA_UPDATE instead (handleServerMediaUpdate).
-		g.log.Info().Int64("version", version).Msg("Offered the Matrix user's camera, waiting for the SFU's answer")
+		g.log.Info().Int64("version", version).Str("track", what).Msg("Offered a track of the Matrix user's, waiting for the SFU's answer")
 		return nil
 	}
 	if err = leg.SetRenegotiationAnswer(metacall.PrepareRemoteSDP(cmu.Answer.SDP)); err != nil {
 		return fmt.Errorf("apply the SFU's answer: %w", err)
 	}
-	g.log.Info().Int64("version", version).Msg("The SFU accepted the Matrix user's camera")
+	g.log.Info().Int64("version", version).Str("track", what).Msg("The SFU accepted a track of the Matrix user's")
 	return nil
 }
 
@@ -638,6 +737,12 @@ func (g *groupCall) ownTracks(leg *callbridge.Leg, audioOn, videoOn bool) map[st
 	tracks := map[string]rtcsignal.TrackInfo{leg.TrackID: {Enabled: audioOn, Owner: self, Label: rtcsignal.TrackLabelAudio}}
 	if leg.LocalVideo != nil {
 		tracks[leg.VideoTrackID] = rtcsignal.TrackInfo{Enabled: videoOn, Owner: self, Label: rtcsignal.TrackLabelVideo}
+	}
+	if leg.LocalScreen != nil {
+		g.lock.Lock()
+		screenOn := g.screenOn
+		g.lock.Unlock()
+		tracks[leg.ScreenTrackID] = rtcsignal.TrackInfo{Enabled: screenOn, Owner: self, Label: rtcsignal.TrackLabelScreen}
 	}
 	return tracks
 }

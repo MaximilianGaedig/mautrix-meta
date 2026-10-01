@@ -430,6 +430,7 @@ func (s *callSession) startRTCRelay() {
 	go s.relayMetaVideoToRTC(metaLeg, rtc)
 	// Also for audio calls: when the Matrix user turns their camera on, Messenger gets it too.
 	go s.relayRTCVideoToMeta(rtc, metaLeg)
+	go s.relayRTCScreenToMeta(rtc, metaLeg)
 	time.AfterFunc(callSetupTimeout, func() {
 		if !s.mediaConnected.Load() && s.ctx.Err() == nil {
 			s.log.Warn().Msg("Messenger media didn't connect in time")
@@ -494,6 +495,18 @@ func (s *callSession) requestMetaKeyframeBurst() {
 	}()
 }
 
+// rtcCameraCodec is what Element Call sends a camera as here: H264, which it is set to because
+// Messenger's phone apps take nothing else (it keeps VP8 only as a backup for other Matrix clients).
+const rtcCameraCodec = webrtc.MimeTypeH264
+
+// rtcVideoCodec picks the Messenger leg's video codec for a MatrixRTC call from Messenger's offer.
+// The bridge relays video as it is, so the leg has to speak what Element Call sends: H264 wherever
+// Messenger offers it, which its web client does beside VP8 and its phone apps do alone. Taking VP8
+// because the web client offered it too left the two legs on different codecs and no video.
+func rtcVideoCodec(offerSDP string) string {
+	return callbridge.PickVideoCodecPreferring(offerSDP, rtcCameraCodec)
+}
+
 // relayRTCVideoToMeta sends the Matrix user's camera to Messenger: turning video on in an audio call
 // first, and following each new track when the camera is turned off and on again (LiveKit publishes
 // a new one), through one rewriter so Messenger sees a continuous stream.
@@ -526,9 +539,11 @@ func (s *callSession) relayRTCVideoToMeta(rtc *callbridge.RTCLeg, metaLeg *callb
 			}
 		}
 		if got, want := tr.Codec().MimeType, s.videoCodec; !strings.EqualFold(got, want) {
+			// Not the end of video for the call: the camera turned off and on is a new track, and
+			// another participant's client may send the codec this one doesn't.
 			s.log.Warn().Str("matrix_codec", got).Str("messenger_codec", want).
-				Msg("The Element call's video codec differs from Messenger's, not relaying video")
-			return
+				Msg("The Element call's video codec differs from Messenger's, not relaying this camera track")
+			continue
 		}
 		curLock.Lock()
 		current = tr
@@ -567,7 +582,7 @@ func (cb *callBridge) startOutgoingRTC(ctx context.Context, portal *bridgev2.Por
 	s.rtcMode = true
 	s.e2ee = meta.WhatsAppServer != ""
 	if video {
-		s.videoCodec = webrtc.MimeTypeVP8
+		s.videoCodec = rtcCameraCodec
 	}
 	s.rtcVideoIntent = video
 	s.lock.Unlock()
@@ -659,40 +674,60 @@ func (cb *callBridge) handleRTCDecline(evt *event.Event) {
 // the web client does when its camera turns on: CLIENT_MEDIA_UPDATE with the tracks and an offer,
 // answered in the response (or in a SERVER_MEDIA_UPDATE).
 func (s *callSession) sendMetaVideo(mime string) error {
+	err := s.offerMetaTrack("video", func(leg *callbridge.Leg) error { return leg.AddVideoTrack(mime) })
+	if err == nil {
+		s.lock.Lock()
+		s.videoCodec = mime
+		s.lock.Unlock()
+	}
+	return err
+}
+
+// sendMetaScreen adds a track for the Matrix user's shared screen to the Messenger leg, beside the
+// camera's, labelled as a screen: how the web client shares one (ZenonScreenShare, everywhere but
+// Safari - there the screen replaces the camera in its own track).
+func (s *callSession) sendMetaScreen(mime string) error {
+	return s.offerMetaTrack("screen share", func(leg *callbridge.Leg) error { return leg.AddScreenTrack(mime) })
+}
+
+// offerMetaTrack adds a track to the Messenger leg and renegotiates it.
+func (s *callSession) offerMetaTrack(what string, add func(*callbridge.Leg) error) error {
 	s.lock.Lock()
 	leg, cc := s.metaLeg, s.cc
 	s.lock.Unlock()
 	if leg == nil || cc == nil {
 		return errors.New("not in the Messenger call")
 	}
-	if err := leg.AddVideoTrack(mime); err != nil {
-		return fmt.Errorf("add video track: %w", err)
+	if err := add(leg); err != nil {
+		return fmt.Errorf("add %s track: %w", what, err)
 	}
 	offer, err := leg.Renegotiate()
 	if err == nil {
 		offer, err = metacall.PrepareLocalSDP(offer, s.m.callIdentity(), true)
 	}
 	if err != nil {
-		return fmt.Errorf("create video offer: %w", err)
+		return fmt.Errorf("create %s offer: %w", what, err)
 	}
 	// The media state version is the offer's o= session version, like the web client.
 	version, err := callbridge.SDPVersion(offer)
 	if err != nil {
 		leg.RollbackOffer()
-		return fmt.Errorf("video offer version: %w", err)
+		return fmt.Errorf("%s offer version: %w", what, err)
 	}
-	tracks := map[string]rtcsignal.TrackInfo{
-		leg.TrackID:      {Enabled: true, Label: rtcsignal.TrackLabelAudio},
-		leg.VideoTrackID: {Enabled: true, Label: rtcsignal.TrackLabelVideo},
+	audioOn, videoOn := true, leg.LocalVideo != nil
+	s.lock.Lock()
+	if s.sentMediaState != nil {
+		audioOn = s.sentMediaState[0]
+		// The camera being added is on; one that was there keeps the state Messenger last heard.
+		videoOn = what == "video" || s.sentMediaState[1]
 	}
-	resp, err := s.cb.sig.Request(s.ctx, cc.NewClientMediaUpdate(version, tracks, offer))
+	screenOn := s.screenOn
+	s.lock.Unlock()
+	resp, err := s.cb.sig.Request(s.ctx, cc.NewClientMediaUpdate(version, metaTracks(leg, audioOn, videoOn, screenOn), offer))
 	if err != nil {
 		leg.RollbackOffer()
 		return fmt.Errorf("CLIENT_MEDIA_UPDATE (version %d): %w", version, err)
 	}
-	s.lock.Lock()
-	s.videoCodec = mime
-	s.lock.Unlock()
 	cmu := resp.Body.ClientMediaUpdateResponse
 	if cmu == nil || cmu.Answer == nil || cmu.Answer.SDP == "" {
 		// The peer's answer comes as a SERVER_MEDIA_UPDATE instead.
@@ -707,10 +742,89 @@ func (s *callSession) sendMetaVideo(mime string) error {
 		return fmt.Errorf("verify answer: %w", err)
 	}
 	if err = leg.SetRenegotiationAnswer(metacall.PrepareRemoteSDP(cmu.Answer.SDP)); err != nil {
-		callbridge.LogSDPShape(s.log.Err(err), cmu.Answer.SDP).Msg("Failed to apply Messenger's answer to our video")
+		callbridge.LogSDPShape(s.log.Err(err), cmu.Answer.SDP).Str("track", what).Msg("Failed to apply Messenger's answer to our new track")
 		return err
 	}
-	s.log.Info().Int64("version", version).Int64("current_version", cmu.CurrentVersion).
-		Msg("Turned on video towards Messenger")
+	s.log.Info().Int64("version", version).Int64("current_version", cmu.CurrentVersion).Str("track", what).
+		Msg("Turned on a track towards Messenger")
 	return nil
+}
+
+// metaTracks is our tracks' state as Messenger's media status carries it: the microphone, the
+// camera once there is one, and a shared screen once there is one.
+func metaTracks(leg *callbridge.Leg, audioOn, videoOn, screenOn bool) map[string]rtcsignal.TrackInfo {
+	tracks := map[string]rtcsignal.TrackInfo{leg.TrackID: {Enabled: audioOn, Label: rtcsignal.TrackLabelAudio}}
+	if leg.LocalVideo != nil {
+		tracks[leg.VideoTrackID] = rtcsignal.TrackInfo{Enabled: videoOn, Label: rtcsignal.TrackLabelVideo}
+	}
+	if leg.LocalScreen != nil {
+		tracks[leg.ScreenTrackID] = rtcsignal.TrackInfo{Enabled: screenOn, Label: rtcsignal.TrackLabelScreen}
+	}
+	return tracks
+}
+
+// relayRTCScreenToMeta sends the Matrix user's shared screen to Messenger. Element Call publishes
+// it as a track of its own beside the camera; it used to be sorted with the camera, where it waited
+// behind the camera's relay and was never sent. Each time a screen is shared (a new track each
+// time) it goes into the one screen track on the Messenger leg, which is switched off in between.
+func (s *callSession) relayRTCScreenToMeta(rtc *callbridge.RTCLeg, metaLeg *callbridge.Leg) {
+	rw := &callbridge.Rewriter{FrameTicks: callbridge.VideoFrameTicks}
+	for s.ctx.Err() == nil {
+		tr, err := rtc.RemoteScreen(s.ctx)
+		if err != nil {
+			return
+		}
+		mime := tr.Codec().MimeType
+		rlog := s.log.With().Str("from", "matrixrtc").Str("what", "screen").Str("codec", mime).Logger()
+		s.setScreenOn(true)
+		if metaLeg.LocalScreen == nil {
+			if err = s.sendMetaScreen(mime); err != nil {
+				rlog.Err(err).Msg("Failed to start sharing the Matrix user's screen with Messenger")
+				s.setScreenOn(false)
+				continue
+			}
+		} else if have := metaLeg.LocalScreen.Codec().MimeType; !strings.EqualFold(have, mime) {
+			rlog.Warn().Str("messenger_codec", have).Msg("The shared screen's codec changed, not relaying it")
+			s.setScreenOn(false)
+			continue
+		} else {
+			s.resendMetaMediaState()
+		}
+		metaLeg.OnScreenKeyframeRequest(func() { rtc.RequestKeyframe(tr) })
+		go func() {
+			for _, d := range []time.Duration{0, 600 * time.Millisecond, time.Second} {
+				time.Sleep(d)
+				if s.ctx.Err() != nil {
+					return
+				}
+				rtc.RequestKeyframe(tr)
+			}
+		}()
+		rlog.Info().Msg("Relaying the Matrix user's shared screen to Messenger")
+		var stats callbridge.RelayStats
+		err = callbridge.RelayVideoWith(s.ctx, tr, uint8(tr.PayloadType()), metaLeg.LocalScreen, &stats, rlog, rw)
+		rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Screen relay stopped")
+		// The share ended: Messenger is told, or it keeps the last frame on screen.
+		s.setScreenOn(false)
+		s.resendMetaMediaState()
+	}
+}
+
+func (s *callSession) setScreenOn(on bool) {
+	s.lock.Lock()
+	s.screenOn = on
+	s.lock.Unlock()
+}
+
+// resendMetaMediaState passes our tracks' state to Messenger again after the shared screen came or
+// went, which the microphone and camera state alone doesn't show as a change.
+func (s *callSession) resendMetaMediaState() {
+	s.lock.Lock()
+	audioOn, videoOn := true, false
+	if s.sentMediaState != nil {
+		audioOn, videoOn = s.sentMediaState[0], s.sentMediaState[1]
+	}
+	s.sentMediaState = nil
+	s.lock.Unlock()
+	s.sendMetaMediaState(audioOn, videoOn)
 }
