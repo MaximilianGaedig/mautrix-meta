@@ -24,6 +24,7 @@ import (
 	"go.mau.fi/mautrix-meta/pkg/metadb"
 	"go.mau.fi/mautrix-meta/pkg/msgconv/igconv"
 	"go.mau.fi/mautrix-meta/pkg/msgconv/mediadl"
+	"go.mau.fi/mautrix-meta/pkg/presence"
 )
 
 type IGConnector struct {
@@ -31,6 +32,8 @@ type IGConnector struct {
 	Config  Config
 	MsgConv *igconv.MessageConverter
 	DB      *metadb.MetaDB
+
+	presence *presence.Manager
 }
 
 var (
@@ -52,6 +55,7 @@ func (ic *IGConnector) Start(ctx context.Context) error {
 	if err != nil {
 		return bridgev2.DBUpgradeError{Err: err, Section: "meta"}
 	}
+	ic.startPresence(ctx)
 	return nil
 }
 

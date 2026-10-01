@@ -300,6 +300,9 @@ func (ic *IGClient) handleDelta(ctx context.Context, d *slidetypes.Delta) (retEr
 		}
 	}
 
+	// Before the portal lookup: someone who wrote or read was here whether or not the chat can be bridged.
+	ic.noteDeltaActivity(d)
+
 	portalKey, didResync, err := ic.ensurePortal(ctx, d.ThreadIGID, allowCreate, fmt.Sprintf("delta %s", d.TypeName))
 	if err != nil {
 		return fmt.Errorf("failed to ensure portal for thread %s: %w", d.ThreadIGID, err)
@@ -674,6 +677,7 @@ func (ic *IGClient) handleTyping(ctx context.Context, evt *slidetypes.TypingNoti
 	} else if userID == 0 {
 		return nil
 	}
+	ic.noteActivity(userID, evt.Timestamp.Time)
 	timeout := 6 * time.Second
 	if evt.ActivityStatus == 0 {
 		timeout = 0
