@@ -928,6 +928,12 @@ func threadsWithStateChanges(tbl *table.LSTable, mapKey func(int64) int64) exmap
 	set := make(exmaps.Set[int64])
 	add := func(threadKey int64) { set.Add(mapKey(threadKey)) }
 	for _, row := range tbl.LSAddParticipantIdToGroupThread {
+		// The participant row is written again when somebody is given a nickname. That renames
+		// the ghost in the room, but only the admin text says who did it, so it stays. Somebody
+		// who is joining has no nickname yet.
+		if row.Nickname != "" {
+			continue
+		}
 		add(row.ThreadKey)
 	}
 	for _, row := range tbl.LSRemoveParticipantFromThread {

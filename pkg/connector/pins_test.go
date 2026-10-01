@@ -84,7 +84,7 @@ func TestThreadsWithStateChanges(t *testing.T) {
 			t.Errorf("thread %d changed state", k)
 		}
 	}
-	// A theme or nickname change has no room state: its admin text is all there is.
+	// A theme change has no room state: its admin text is all there is.
 	if got.Has(6) || len(threadsWithStateChanges(&table.LSTable{LSUpdateThreadTheme: []*table.LSUpdateThreadTheme{{}}}, identity)) != 0 {
 		t.Error("no state change, no thread")
 	}

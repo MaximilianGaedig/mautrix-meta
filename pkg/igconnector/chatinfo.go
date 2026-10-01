@@ -214,10 +214,7 @@ func (ic *IGClient) wrapChatInfo(info *slidetypes.ThreadInfo) *bridgev2.ChatInfo
 			},
 		},
 	}
-	nickMap := make(map[int64]*string, len(info.Nicknames))
-	for _, nick := range info.Nicknames {
-		nickMap[nick.EIMUID] = &nick.Nickname
-	}
+	nicknames := threadNicknames(info.Nicknames)
 	addMember := func(member *slidetypes.User) {
 		var powerLevel *int
 		if info.AdminUserIDs != nil {
@@ -229,7 +226,7 @@ func (ic *IGClient) wrapChatInfo(info *slidetypes.ThreadInfo) *bridgev2.ChatInfo
 		members.MemberMap.Add(bridgev2.ChatMember{
 			EventSender: ic.makeEventSender(member.InteropMessagingUserFBID),
 			Membership:  event.MembershipJoin,
-			Nickname:    nickMap[member.InteropMessagingUserFBID],
+			Nickname:    nicknames(member.InteropMessagingUserFBID),
 			PowerLevel:  powerLevel,
 			UserInfo:    ic.wrapUserInfo(member),
 		})
@@ -296,5 +293,23 @@ func makeNoteToSelfMembers(otherUserID networkid.UserID, info *bridgev2.UserInfo
 	return map[networkid.UserID]bridgev2.ChatMember{
 		"":          {EventSender: bridgev2.EventSender{IsFromMe: true}},
 		otherUserID: {EventSender: bridgev2.EventSender{Sender: otherUserID}, UserInfo: info},
+	}
+}
+
+// threadNicknames returns what each member of a thread is called in that thread only.
+//
+// A thread that lists its nicknames says something about every member: the ones not listed have
+// none, which has to be passed on as an empty nickname so that a removed one goes away in the room
+// too. A payload without the list says nothing about anyone, and nil leaves the names alone.
+func threadNicknames(list []slidetypes.Nickname) func(userID int64) *string {
+	if list == nil {
+		return func(int64) *string { return nil }
+	}
+	byUser := make(map[int64]string, len(list))
+	for _, nick := range list {
+		byUser[nick.EIMUID] = nick.Nickname
+	}
+	return func(userID int64) *string {
+		return ptr.Ptr(byUser[userID])
 	}
 }

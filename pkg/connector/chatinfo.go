@@ -279,9 +279,13 @@ func (m *MetaClient) wrapChatMember(tbl *table.LSAddParticipantIdToGroupThread) 
 	}
 	return bridgev2.ChatMember{
 		EventSender: m.makeEventSender(tbl.ContactId),
-		Nickname:    &tbl.Nickname,
-		Membership:  event.MembershipJoin,
-		PowerLevel:  &power,
+		// The row always says what the participant is called in this thread, in groups and in
+		// chats between two people alike, so an empty nickname is passed on as "none" rather than
+		// left out: that is what takes the name in the room back to the real one when a nickname
+		// is removed.
+		Nickname:   &tbl.Nickname,
+		Membership: event.MembershipJoin,
+		PowerLevel: &power,
 	}
 }
 
