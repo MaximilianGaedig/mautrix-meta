@@ -47,6 +47,7 @@ type MetaClient struct {
 	backfillLock         sync.Mutex
 	connectLock          sync.Mutex
 	pushRegistrationLock sync.Mutex
+	friendRequestLock    sync.Mutex
 	stopConnectAttempt   atomic.Pointer[context.CancelFunc]
 	permanentErrored     atomic.Bool
 

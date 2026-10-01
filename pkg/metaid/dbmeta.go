@@ -57,6 +57,11 @@ type UserLoginMetadata struct {
 
 	// Thread backfill state
 	BackfillCompleted bool `json:"backfill_completed,omitempty"`
+
+	// FriendRequestsSentAt is when this login last asked Meta to send a friend request, in unix
+	// seconds, kept only as far back as the rate limit looks. Stored rather than held in memory
+	// so that a restart does not hand out a fresh allowance.
+	FriendRequestsSentAt []int64 `json:"friend_requests_sent_at,omitempty"`
 }
 
 func (m *UserLoginMetadata) GeneratePushKeys() {
