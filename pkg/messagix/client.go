@@ -63,6 +63,9 @@ type Client struct {
 
 	endpoints  map[string]string
 	nextTaskID atomic.Int64
+	// friendingMutationID counts friending mutations the way the web client's Relay layer numbers
+	// every mutation it makes (client_mutation_id).
+	friendingMutationID atomic.Int64
 
 	catRefreshLock         sync.Mutex
 	unnecessaryCATRequests int
