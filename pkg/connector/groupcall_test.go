@@ -113,6 +113,58 @@ func TestGroupCallSubscribesToScreenShares(t *testing.T) {
 	}
 }
 
+// The numbers a shared screen goes by on the wire are the web client's TrackLabel: 3 for its picture
+// and 2 for its sound. The bridge had 2 for the picture: it took the sound of a shared tab for a
+// screen to show, missed the screen itself, and labelled the Matrix user's screen as audio, which the
+// web client never draws.
+func TestScreenLabelsAreTheWebClients(t *testing.T) {
+	const camera, screenAudio, screenVideo = 1, 2, 3
+	status := map[string]rtcsignal.TrackInfo{
+		"cam": {Enabled: true, Owner: "200", Label: camera},
+		"scr": {Enabled: true, Owner: "200", Label: screenVideo},
+		"tab": {Enabled: true, Owner: "200", Label: screenAudio},
+	}
+	smu := &rtcsignal.Message{Body: rtcsignal.Body{ServerMediaUpdateRequest: &rtcsignal.ServerMediaUpdateRequest{MediaStatus: status}}}
+
+	// A 1:1 call.
+	s := &callSession{cb: &callBridge{log: zerolog.Nop()}, log: zerolog.Nop()}
+	s.handleServerMediaUpdate(smu)
+	if !s.peerScreens["scr"] || s.peerScreens["tab"] || s.peerScreens["cam"] {
+		t.Errorf("1:1 screens = %v, want only the screen's picture", s.peerScreens)
+	}
+
+	// A group call.
+	cb := &callBridge{log: zerolog.Nop(), m: &MetaClient{UserLogin: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "100"}}}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "555"}}}
+	g, err := cb.newGroupCall(context.Background(), portal, "555", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.handleServerMediaUpdate(smu)
+	g.updateSubscriptions(status)
+	g.lock.Lock()
+	if !g.subscribed["scr"] || !g.subscribed["cam"] || g.subscribed["tab"] {
+		t.Errorf("group video subscriptions = %v, want the camera and the screen's picture", g.subscribed)
+	}
+	if !g.screens["scr"] || g.screens["tab"] || g.screens["cam"] {
+		t.Errorf("group screens = %v, want only the screen's picture", g.screens)
+	}
+	g.lock.Unlock()
+
+	// The Matrix user's own screen.
+	leg := &callbridge.Leg{TrackID: "aud", ScreenTrackID: "own"}
+	if leg.LocalScreen, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "own", "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := metaTracks(leg, true, false, true)["own"].Label; got != screenVideo {
+		t.Errorf("our screen in a 1:1 call is labelled %d, want %d", got, screenVideo)
+	}
+	g.setScreenOn(true)
+	if got := g.ownTracks(leg, true, false)["own"].Label; got != screenVideo {
+		t.Errorf("our screen in a group call is labelled %d, want %d", got, screenVideo)
+	}
+}
+
 // Once the Matrix user's camera is added, the SFU is told about it with the audio, both owned by us:
 // joined receive-only, the bridge never sent a camera into Messenger group calls.
 func TestGroupCallReportsOwnCamera(t *testing.T) {

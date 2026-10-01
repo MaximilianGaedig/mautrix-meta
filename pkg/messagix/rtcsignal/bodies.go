@@ -251,13 +251,18 @@ func (w *writer) dataMessages(id int16, msgs []DataMessage) {
 	}
 }
 
-// ClientTrackInfo.label values seen in the server's media status.
+// ClientTrackInfo.label values: the web client's WebrtcSignalingCommonTypes.TrackLabel
+// {DEFAULT_AUDIO:0, DEFAULT_VIDEO:1, SCREEN_AUDIO:2, SCREEN_VIDEO:3, CUSTOM_VIDEO:4, CUSTOM_AUDIO:5}.
+// Its ZenonMWThriftTranslatorUtils sends a shared screen's picture as SCREEN_VIDEO and reads a
+// track labelled SCREEN_AUDIO as the sound that goes with one, never as something to show.
 const (
 	TrackLabelAudio int32 = 0
 	TrackLabelVideo int32 = 1
-	// TrackLabelScreen is a shared screen, a track of its own beside the camera (web client enum
-	// {AUDIO:0,VIDEO:1,SCREEN:2}).
-	TrackLabelScreen int32 = 2
+	// TrackLabelScreenAudio is the sound of a shared screen (a browser tab's audio), an audio track
+	// of its own beside the microphone.
+	TrackLabelScreenAudio int32 = 2
+	// TrackLabelScreen is a shared screen's picture, a video track of its own beside the camera.
+	TrackLabelScreen int32 = 3
 )
 
 // TrackInfo is ClientTrackInfo (ClientMediaStatus.tracks value).
