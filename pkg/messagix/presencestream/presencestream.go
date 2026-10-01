@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 // Package presencestream implements Meta's "PresenceUnifiedJSON" request
-// stream, which is how the Messenger and Instagram web clients learn whether
+// stream, which is how the Facebook and Messenger web clients learn whether
 // their contacts are "Active now" or when they were last active.
 //
 // The web client (PresenceUnifiedClient in the static JS bundles) opens a DGW
@@ -50,6 +50,11 @@ const Method = "PresenceUnifiedJSON"
 const PollInterval = 150 * time.Second
 
 // AppFamily is PresenceCommonPresenceCommonTypes.AppFamily.
+//
+// Only the Facebook and Messenger requests have been seen being made. The enum
+// has an Instagram member, but no capture of instagram.com shows a request
+// with it, so which app ID, polling mode and kind of user ID go with it is not
+// known and the bridge does not send it.
 type AppFamily int
 
 const (
