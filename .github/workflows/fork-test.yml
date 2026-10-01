@@ -1,0 +1,25 @@
+name: Fork tests
+
+# Upstream's workflow only lints. This one runs the tests on every pushed branch, so a branch can be
+# proven here before it is merged into main - which is what rebuilds the image and restarts the bridge.
+on:
+  push: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet -tags goolm ./...
+      - name: Test
+        run: go test -tags goolm ./...
