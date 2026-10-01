@@ -12,7 +12,6 @@ import (
 type sentReq struct {
 	key string
 	p   event.Presence
-	msg string
 }
 
 type harness struct {
@@ -24,11 +23,11 @@ type harness struct {
 
 func newHarness(cfg Config) *harness {
 	h := &harness{now: time.Unix(1_700_000_000, 0)}
-	h.m = NewManager(cfg, func(ctx context.Context, key string, p event.Presence, msg string) error {
+	h.m = NewManager(cfg, func(ctx context.Context, key string, p event.Presence) error {
 		if h.fail {
 			return fmt.Errorf("boom")
 		}
-		h.sent = append(h.sent, sentReq{key: key, p: p, msg: msg})
+		h.sent = append(h.sent, sentReq{key: key, p: p})
 		return nil
 	})
 	h.m.now = func() time.Time { return h.now }
@@ -194,20 +193,19 @@ func TestTokenBucket(t *testing.T) {
 
 func TestOnlyPresenceIsSent(t *testing.T) {
 	h := newHarness(Config{})
-	// First sight of anyone not online isn't sent (it would stamp them active now), status messages
-	// never are.
-	h.m.Update("hidden", State{Presence: event.PresenceUnavailable, StatusMsg: "last seen recently"})
-	h.m.Update("exact", State{Presence: event.PresenceOffline, StatusMsg: "last seen 2026-09-18T19:40:00Z"})
-	h.m.Update("online", State{Presence: event.PresenceOnline, StatusMsg: "anything"})
+	// First sight of anyone not online isn't sent (it would stamp them active now).
+	h.m.Update("hidden", State{Presence: event.PresenceUnavailable})
+	h.m.Update("exact", State{Presence: event.PresenceOffline})
+	h.m.Update("online", State{Presence: event.PresenceOnline})
 	h.advance(time.Minute)
 	s := h.take()
-	if len(s) != 1 || s[0].key != "online" || s[0].p != event.PresenceOnline || s[0].msg != "" {
+	if len(s) != 1 || s[0].key != "online" || s[0].p != event.PresenceOnline {
 		t.Fatalf("unexpected sends: %+v", s)
 	}
-	// Going offline is sent once, as offline, without text.
-	h.m.Update("online", State{Presence: event.PresenceUnavailable, StatusMsg: "last seen now"})
+	// Going offline is sent once, as offline.
+	h.m.Update("online", State{Presence: event.PresenceUnavailable})
 	h.advance(time.Minute)
-	if s = h.take(); len(s) != 1 || s[0].p != event.PresenceOffline || s[0].msg != "" {
+	if s = h.take(); len(s) != 1 || s[0].p != event.PresenceOffline {
 		t.Fatalf("expected one offline, got %+v", s)
 	}
 	h.m.Update("online", State{Presence: event.PresenceOffline})

@@ -36,10 +36,6 @@ import (
 	"go.mau.fi/mautrix-meta/pkg/presence"
 )
 
-// LastSeenPrefix starts every status_msg the bridge sets, so clients can
-// recognise and reformat it (e.g. "last seen 5 minutes ago").
-const LastSeenPrefix = "last seen "
-
 // maxPresenceThreads is how many recent 1:1 chats have their other
 // participant subscribed as an additional presence contact.
 const maxPresenceThreads = 200
@@ -49,22 +45,19 @@ const maxPresenceThreads = 200
 const maxPresenceMembers = 5000
 
 // mapMetaPresence converts a Meta contact status to Matrix presence: active
-// contacts are online, everyone else is offline with the exact last active
-// time in status_msg ("last seen <RFC3339 UTC>") when Meta shares it.
-func mapMetaPresence(active bool, lastActive, until time.Time) presence.State {
+// contacts are online, everyone else is offline. Only presence goes to Matrix,
+// never a "last seen" status text: the time someone was last active is
+// reported to the homeserver's activity log instead (presence.SeenReporter).
+func mapMetaPresence(active bool, until time.Time) presence.State {
 	if active {
 		return presence.State{Presence: event.PresenceOnline, Until: until}
 	}
-	st := presence.State{Presence: event.PresenceOffline}
-	if !lastActive.IsZero() {
-		st.StatusMsg = LastSeenPrefix + lastActive.UTC().Truncate(time.Second).Format(time.RFC3339)
-	}
-	return st
+	return presence.State{Presence: event.PresenceOffline}
 }
 
 // mapPresenceUpdate maps one update from the PresenceUnifiedJSON stream.
 func mapPresenceUpdate(u *presencestream.Update) presence.State {
-	return mapMetaPresence(u.IsActive(), u.LastActive(), time.Time{})
+	return mapMetaPresence(u.IsActive(), time.Time{})
 }
 
 // LSPresenceStatus from the web client's LS schema.
@@ -73,18 +66,12 @@ const lsPresenceStatusActive = 2
 // mapLSContactPresence maps a deleteThenInsertContactPresence LS row
 // (presence_states table). Rows that already expired are treated as offline.
 func mapLSContactPresence(row *table.LSDeleteThenInsertContactPresence, now time.Time) presence.State {
-	var lastActive, until time.Time
-	if row.LastActiveTimestampMs > 0 {
-		lastActive = time.UnixMilli(row.LastActiveTimestampMs)
-	}
+	var until time.Time
 	if row.ExpirationTimestampMs > 0 {
 		until = time.UnixMilli(row.ExpirationTimestampMs)
 	}
 	active := row.Status == lsPresenceStatusActive && (until.IsZero() || now.Before(until))
-	if !active && row.Status == lsPresenceStatusActive && lastActive.IsZero() {
-		lastActive = until
-	}
-	return mapMetaPresence(active, lastActive, until)
+	return mapMetaPresence(active, until)
 }
 
 // presenceTracker turns the stream's full and incremental publishes into
@@ -93,14 +80,14 @@ func mapLSContactPresence(row *table.LSDeleteThenInsertContactPresence, now time
 // of staying online forever.
 type presenceTracker struct {
 	lock   sync.Mutex
-	online map[int64]time.Time // user ID -> last time confirmed active
+	online map[int64]struct{} // users last reported active
 }
 
-func (pt *presenceTracker) applyPublish(pub *presencestream.Publish, self int64, now time.Time) map[int64]presence.State {
+func (pt *presenceTracker) applyPublish(pub *presencestream.Publish, self int64) map[int64]presence.State {
 	pt.lock.Lock()
 	defer pt.lock.Unlock()
 	if pt.online == nil {
-		pt.online = make(map[int64]time.Time)
+		pt.online = make(map[int64]struct{})
 	}
 	out := make(map[int64]presence.State, len(pub.PresenceUpdates))
 	seen := make(map[int64]struct{}, len(pub.PresenceUpdates))
@@ -111,23 +98,17 @@ func (pt *presenceTracker) applyPublish(pub *presencestream.Publish, self int64,
 			continue
 		}
 		seen[id] = struct{}{}
-		st := mapPresenceUpdate(u)
 		if u.IsActive() {
-			pt.online[id] = now
+			pt.online[id] = struct{}{}
 		} else {
-			if st.StatusMsg == "" {
-				if last, ok := pt.online[id]; ok {
-					st = mapMetaPresence(false, last, time.Time{})
-				}
-			}
 			delete(pt.online, id)
 		}
-		out[id] = st
+		out[id] = mapPresenceUpdate(u)
 	}
 	if pub.IsFull() {
-		for id, last := range pt.online {
+		for id := range pt.online {
 			if _, ok := seen[id]; !ok {
-				out[id] = mapMetaPresence(false, last, time.Time{})
+				out[id] = mapMetaPresence(false, time.Time{})
 				delete(pt.online, id)
 			}
 		}
@@ -137,27 +118,26 @@ func (pt *presenceTracker) applyPublish(pub *presencestream.Publish, self int64,
 
 // applyLS records presence from LS rows, so that the stream's bookkeeping
 // knows about online users that came from the LS path.
-func (pt *presenceTracker) applyLS(id int64, st presence.State, now time.Time) {
+func (pt *presenceTracker) applyLS(id int64, st presence.State) {
 	pt.lock.Lock()
 	defer pt.lock.Unlock()
 	if pt.online == nil {
-		pt.online = make(map[int64]time.Time)
+		pt.online = make(map[int64]struct{})
 	}
 	if st.Presence == event.PresenceOnline {
-		pt.online[id] = now
+		pt.online[id] = struct{}{}
 	} else {
 		delete(pt.online, id)
 	}
 }
 
-// closeAll marks every user that was online as offline, last seen at the
-// time they were last confirmed active.
+// closeAll marks every user that was online as offline.
 func (pt *presenceTracker) closeAll() map[int64]presence.State {
 	pt.lock.Lock()
 	defer pt.lock.Unlock()
 	out := make(map[int64]presence.State, len(pt.online))
-	for id, last := range pt.online {
-		out[id] = mapMetaPresence(false, last, time.Time{})
+	for id := range pt.online {
+		out[id] = mapMetaPresence(false, time.Time{})
 	}
 	clear(pt.online)
 	return out
@@ -380,7 +360,7 @@ func (m *MetaClient) handlePresencePublish(evt *messagix.PresenceEvent) {
 	if !m.presenceEnabled() {
 		return
 	}
-	m.sendPresenceStates(m.presenceTracker.applyPublish(evt.Publish, m.selfFBID(), time.Now()))
+	m.sendPresenceStates(m.presenceTracker.applyPublish(evt.Publish, m.selfFBID()))
 	// "Offline" is all Matrix presence can say of someone who has come and gone; when they were
 	// last here goes to the homeserver's activity log, where it keeps one.
 	self := m.selfFBID()
@@ -424,7 +404,7 @@ func (m *MetaClient) handleTablePresence(ctx context.Context, tbl *table.LSTable
 		if row.LastActiveTimestampMs > 0 {
 			m.Main.seen.Note(string(metaid.MakeUserID(row.ContactId)), time.UnixMilli(row.LastActiveTimestampMs))
 		}
-		m.presenceTracker.applyLS(row.ContactId, st, now)
+		m.presenceTracker.applyLS(row.ContactId, st)
 		m.Main.presence.Update(string(metaid.MakeUserID(row.ContactId)), st)
 	}
 	if ids, changed := m.presenceContacts.add(tbl, self); changed && m.Client != nil {
