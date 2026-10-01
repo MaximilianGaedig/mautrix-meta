@@ -473,8 +473,12 @@ func (s *callSession) relayMetaVideoToRTC(metaLeg *callbridge.Leg, rtc *callbrid
 		go func(tr *webrtc.TrackRemote, dst callbridge.RTPWriter) {
 			var stats callbridge.RelayStats
 			rlog := s.log.With().Str("from", "messenger").Str("codec", tr.Codec().MimeType).Logger()
-			err := callbridge.RelayVideoWith(s.ctx, tr, uint8(tr.PayloadType()), dst, &stats, rlog, rw)
-			rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).Msg("Video relay stopped")
+			// Under every payload type Messenger agreed the codec with: its phones offer H264 twice,
+			// and a track that moves from one to the other (a screen shared in the camera's track)
+			// was dropped whole, leaving the Matrix side on the camera's last frame.
+			err := callbridge.RelayVideoCodec(s.ctx, tr, metaLeg.VideoPayloadTypes(tr), dst, &stats, rlog, rw)
+			rlog.Info().AnErr("relay_err", err).Uint64("forwarded", stats.Forwarded.Load()).
+				Uint64("dropped", stats.Dropped.Load()).Msg("Video relay stopped")
 		}(tr, dst)
 	}
 }
