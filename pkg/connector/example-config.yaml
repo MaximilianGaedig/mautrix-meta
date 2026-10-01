@@ -69,7 +69,8 @@ call_bridging_matrixrtc: true
 call_bridging_frame_encryption_module: null
 # Should view-once messages be disabled entirely?
 disable_view_once: false
-# Room tag to give archived Messenger chats, and that archives a chat on Messenger when you add it in Matrix.
+# Room tag to give archived Messenger chats, and that archives a chat on Messenger when you add it in Matrix
+# (removing it takes the chat out of the archive, except for encrypted chats).
 # Set to m.lowpriority to move archived chats to low priority. Leave empty to not bridge archiving.
 archive_tag:
 # Should FB marketplace chats have a separate space inside the main Facebook space?

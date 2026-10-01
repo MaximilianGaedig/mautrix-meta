@@ -43,7 +43,7 @@ type Config struct {
 	CallBridgingMatrixRTC bool `yaml:"call_bridging_matrixrtc"`
 	DisableViewOnce       bool `yaml:"disable_view_once"`
 	// ArchiveTag is the room tag that archived Messenger chats get, and that archives them when it is added in
-	// Matrix. Empty leaves archiving out of the bridge.
+	// Matrix and takes them out of the archive when it is removed. Empty leaves archiving out of the bridge.
 	ArchiveTag                event.RoomTag `yaml:"archive_tag"`
 	MarketplaceSpace          bool          `yaml:"marketplace_space"`
 	LogRedactedLoginResponses bool          `yaml:"log_redacted_login_responses"`

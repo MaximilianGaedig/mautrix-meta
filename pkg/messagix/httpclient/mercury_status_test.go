@@ -22,6 +22,17 @@ func TestMercuryReadStatusFormIsTheWebClients(t *testing.T) {
 	}
 }
 
+// MercuryServerRequests.changeThreadArchivedStatus sends {ids: {<fbid>: archived}, source}.
+func TestMercuryArchivedStatusFormIsTheWebClients(t *testing.T) {
+	status := NewMercuryArchivedStatus(4242, false)
+	if got, want := status.Form(), "ids[4242]=false&source"; got != want {
+		t.Errorf("unarchive:\n got %s\nwant %s", got, want)
+	}
+	if status.Endpoint != "mercury_change_archived_status" {
+		t.Errorf("endpoint = %q", status.Endpoint)
+	}
+}
+
 func TestMercuryStatusResponse(t *testing.T) {
 	if err := parseMercuryStatusResponse([]byte(`for (;;);{"__ar":1,"payload":null,"lid":"1"}`)); err != nil {
 		t.Errorf("a plain answer is a success: %v", err)

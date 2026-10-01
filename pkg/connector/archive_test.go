@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
 
+	"go.mau.fi/mautrix-meta/pkg/messagix/endpoints"
 	"go.mau.fi/mautrix-meta/pkg/messagix/socket"
 	"go.mau.fi/mautrix-meta/pkg/messagix/table"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
@@ -105,22 +107,53 @@ func TestMovingAThreadDuringASyncTagsTheSync(t *testing.T) {
 	}
 }
 
-func TestArchiveFromTag(t *testing.T) {
-	const tag = event.RoomTag("m.lowpriority")
-	if archive, err := archiveFromTag(tag, tagUpdate(nil, tag)); !archive || err != nil {
-		t.Errorf("tag added: %v %v", archive, err)
+func TestUnarchivingIsTheOlderChatsRequest(t *testing.T) {
+	plain := &bridgev2.Portal{Portal: &database.Portal{
+		PortalKey: networkid.PortalKey{ID: metaid.MakeFBPortalID(4242)},
+		Metadata:  &metaid.PortalMetadata{},
+	}}
+	status, err := unarchiveRequest(plain)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if archive, err := archiveFromTag(tag, tagUpdate([]event.RoomTag{tag}, tag, "m.favourite")); archive || err != nil {
-		t.Errorf("an unrelated tag added while archived must not archive again: %v %v", archive, err)
+	if status.Endpoint != "mercury_change_archived_status" || status.Form() != "ids[4242]=false&source" {
+		t.Errorf("endpoint %q form %s", status.Endpoint, status.Form())
 	}
-	if archive, err := archiveFromTag(tag, tagUpdate(nil, "m.favourite")); archive || err != nil {
-		t.Errorf("an unrelated tag: %v %v", archive, err)
+	encrypted := &bridgev2.Portal{Portal: &database.Portal{
+		PortalKey: networkid.PortalKey{ID: "100000000000002"},
+		Metadata:  &metaid.PortalMetadata{ThreadType: table.ENCRYPTED_OVER_WA_ONE_TO_ONE, FBThreadKey: 777},
+	}}
+	if status, err = unarchiveRequest(encrypted); status != nil || !errors.Is(err, errUnarchiveEncryptedUnsupported) {
+		t.Errorf("encrypted chat: status %v err %v", status, err)
 	}
-	if archive, err := archiveFromTag(tag, tagUpdate([]event.RoomTag{tag})); archive || !errors.Is(err, errUnarchiveUnsupported) {
-		t.Errorf("tag removed: %v %v", archive, err)
+}
+
+func TestRemovingTheArchiveTagIsSentToMessenger(t *testing.T) {
+	m := testMetaClient()
+	m.Main.Config.ArchiveTag = "m.lowpriority"
+	// The made-up login has no cookies, so a tag change that is sent to Messenger stops at not being logged
+	// in, and one that isn't about the archive is ignored before that.
+	if err := m.HandleRoomTag(context.Background(), tagUpdate([]event.RoomTag{"m.lowpriority"})); !errors.Is(err, bridgev2.ErrNotLoggedIn) {
+		t.Errorf("tag removed: %v", err)
 	}
-	if archive, err := archiveFromTag("", tagUpdate(nil, tag)); archive || err != nil {
-		t.Errorf("no archive tag configured: %v %v", archive, err)
+	if err := m.HandleRoomTag(context.Background(), tagUpdate(nil, "m.lowpriority")); !errors.Is(err, bridgev2.ErrNotLoggedIn) {
+		t.Errorf("tag added: %v", err)
+	}
+	if err := m.HandleRoomTag(context.Background(), tagUpdate([]event.RoomTag{"m.lowpriority"}, "m.lowpriority", "m.favourite")); err != nil {
+		t.Errorf("an unrelated tag added while archived: %v", err)
+	}
+	if err := m.HandleRoomTag(context.Background(), tagUpdate([]event.RoomTag{"m.favourite"})); err != nil {
+		t.Errorf("an unrelated tag removed: %v", err)
+	}
+	m.Main.Config.ArchiveTag = ""
+	if err := m.HandleRoomTag(context.Background(), tagUpdate([]event.RoomTag{"m.lowpriority"})); err != nil {
+		t.Errorf("no archive tag configured: %v", err)
+	}
+}
+
+func TestTheArchivedStatusEndpointIsKnown(t *testing.T) {
+	if got := endpoints.FacebookEndpoints["mercury_change_archived_status"]; got != "https://www.facebook.com/ajax/mercury/change_archived_status.php" {
+		t.Errorf("endpoint = %q", got)
 	}
 }
 

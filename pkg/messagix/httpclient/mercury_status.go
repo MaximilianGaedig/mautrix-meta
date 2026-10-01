@@ -42,6 +42,17 @@ func NewMercuryReadStatus(threadID int64, read bool) *MercuryThreadStatus {
 	}
 }
 
+// NewMercuryArchivedStatus is the request of MercuryServerRequests.changeThreadArchivedStatus, whose body is
+// {ids: {<thread>: <archived>}, source}.
+func NewMercuryArchivedStatus(threadID int64, archived bool) *MercuryThreadStatus {
+	return &MercuryThreadStatus{
+		Endpoint: "mercury_change_archived_status",
+		ThreadID: threadID,
+		Value:    archived,
+		NoValue:  []string{"source"},
+	}
+}
+
 // Form is the request body as the web client's PHPQuerySerializer writes it: the nested ids object becomes
 // ids[<thread>], with the brackets left unescaped, and a null argument is only its name.
 func (s *MercuryThreadStatus) Form() string {

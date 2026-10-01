@@ -3,11 +3,13 @@ package connector
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
 
+	"go.mau.fi/mautrix-meta/pkg/messagix/httpclient"
 	"go.mau.fi/mautrix-meta/pkg/messagix/socket"
 	"go.mau.fi/mautrix-meta/pkg/messagix/table"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
@@ -15,7 +17,7 @@ import (
 
 var _ bridgev2.TagHandlingNetworkAPI = (*MetaClient)(nil)
 
-var errUnarchiveUnsupported = errors.New("there is no way on Messenger to take a chat out of the archive from Matrix: a message or the Messenger app does")
+var errUnarchiveEncryptedUnsupported = errors.New("an encrypted Messenger chat can't be taken out of the archive from Matrix: a message or the Messenger app does")
 
 // archiveUserLocal is the tag a chat gets from the folder Messenger keeps it in: the archive tag for archived
 // chats, and nothing for the others, so that tags of other kinds are left alone. Without an archive tag
@@ -79,33 +81,41 @@ func (m *MetaClient) handleMoveThreadToInbox(tk handlerParams, _ *table.LSMoveTh
 	return m.handleFolderMove(tk, false, "LSMoveThreadToInboxAndUpdateParent")
 }
 
-// archiveFromTag says what a Matrix tag update means for archiving: archive the chat when the archive tag was
-// added. Taking a chat out of the archive has no task in the web client, Messenger does it by itself when
-// a message comes, so that is an error. An update that doesn't concern the archive tag is neither.
-func archiveFromTag(archiveTag event.RoomTag, msg *bridgev2.MatrixRoomTag) (archive bool, err error) {
-	change := bridgev2.TagChange(msg, archiveTag)
-	if change == nil {
-		return false, nil
-	} else if !*change {
-		return false, errUnarchiveUnsupported
+// unarchiveRequest takes a chat out of the archive. The socket has no task for that in the web client code
+// that was captured (the remove types of DeleteThreadTask only go into the archive), Messenger does it by
+// itself when a message comes. The older chat code has an endpoint that sets the archived status either way,
+// MercuryServerRequests.changeThreadArchivedStatus, which is what this uses.
+//
+// An encrypted chat is archived through the Messenger thread it replaced, and nothing says that taking that
+// thread out of the archive brings the encrypted one back, so it is refused.
+func unarchiveRequest(portal *bridgev2.Portal) (*httpclient.MercuryThreadStatus, error) {
+	if portal.Metadata.(*metaid.PortalMetadata).ThreadType.IsWhatsApp() {
+		return nil, errUnarchiveEncryptedUnsupported
 	}
-	return true, nil
+	return httpclient.NewMercuryArchivedStatus(metaid.ParseFBPortalID(portal.ID), false), nil
 }
 
-// HandleRoomTag archives a Messenger chat when the archive tag is added to its room.
+// HandleRoomTag archives a Messenger chat when the archive tag is added to its room, and takes it out of the
+// archive when the tag is removed. A tag update that doesn't change the archive tag is ignored, so that tags
+// of other kinds never move a chat.
 func (m *MetaClient) HandleRoomTag(ctx context.Context, msg *bridgev2.MatrixRoomTag) error {
-	archive, err := archiveFromTag(m.Main.Config.ArchiveTag, msg)
+	archive := bridgev2.TagChange(msg, m.Main.Config.ArchiveTag)
+	if archive == nil {
+		return nil
+	} else if m.LoginMeta.Cookies == nil {
+		return bridgev2.ErrNotLoggedIn
+	} else if *archive {
+		_, err := m.Client.ExecuteTasks(ctx, m.threadRemoveTask(msg.Portal, socket.RemoveTypeArchive))
+		return err
+	} else if !m.LoginMeta.Platform.IsMessenger() {
+		return fmt.Errorf("taking chats out of the archive is only bridged to Messenger")
+	}
+	status, err := unarchiveRequest(msg.Portal)
 	if err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("Can't unarchive Messenger chat")
 		return err
-	} else if !archive {
-		return nil
 	}
-	if m.LoginMeta.Cookies == nil {
-		return bridgev2.ErrNotLoggedIn
-	}
-	_, err = m.Client.ExecuteTasks(ctx, m.threadRemoveTask(msg.Portal, socket.RemoveTypeArchive))
-	return err
+	return m.Client.GetHTTP().SendMercuryThreadStatus(ctx, status)
 }
 
 // threadRemoveTask deletes or archives a chat: they are the same task on Messenger.
