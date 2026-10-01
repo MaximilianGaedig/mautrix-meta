@@ -71,6 +71,39 @@ func PrepareRemoteSDP(sdp string) string {
 	return markICELite(callbridge.CollapseSimulcast(rtcsignal.StripDtlsAuth(sdp)))
 }
 
+// VideoFormats lists what an SDP's video sections carry, for logging: per payload type its codec and
+// format parameters ("98 H264/90000 packetization-mode=1;profile-level-id=640c1f"). Two payload
+// types of one codec differ only there, and which of them an answer kept is what the sender may use.
+func VideoFormats(sdp string) []string {
+	var order []string
+	names, params := map[string]string{}, map[string]string{}
+	inVideo := false
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "m="):
+			inVideo = strings.HasPrefix(line, "m=video")
+		case !inVideo:
+		case strings.HasPrefix(line, "a=rtpmap:"):
+			if pt, name, ok := strings.Cut(line[len("a=rtpmap:"):], " "); ok {
+				if _, seen := names[pt]; !seen {
+					order = append(order, pt)
+				}
+				names[pt] = name
+			}
+		case strings.HasPrefix(line, "a=fmtp:"):
+			if pt, param, ok := strings.Cut(line[len("a=fmtp:"):], " "); ok {
+				params[pt] = param
+			}
+		}
+	}
+	out := make([]string, 0, len(order))
+	for _, pt := range order {
+		out = append(out, strings.TrimSpace(pt+" "+names[pt]+" "+params[pt]))
+	}
+	return out
+}
+
 // markICELite declares Messenger's side ICE-lite, which makes the bridge the controlling agent
 // (RFC 8445 6.1.1: a full agent facing a lite one controls).
 //

@@ -392,6 +392,8 @@ type callSession struct {
 	peerVideoEnabled map[string]bool
 	// peerScreens are the Messenger track ids labelled as a shared screen.
 	peerScreens map[string]bool
+	// metaDataSeen are the data channels of the Messenger leg a message has come in on.
+	metaDataSeen map[string]bool
 
 	endOnce sync.Once
 }
@@ -504,8 +506,11 @@ func (s *callSession) handleSignal(msg *rtcsignal.Message) *rtcsignal.Message {
 		s.log.Info().Int32("reason", int32(b.DismissRequest.Reason)).Msg("Messenger ringing dismissed")
 		go s.end(endDismissed, string(dismissHangupReason(b.DismissRequest.Reason)))
 	case b.DataMessageRequest != nil && b.DataMessageRequest.Message != nil:
-		// Group E2EE key messages only matter for SFU calls.
-		s.log.Debug().Str("topic", b.DataMessageRequest.Message.Topic).Msg("Messenger call data message")
+		// Group E2EE key messages only matter for SFU calls. At info, with only the topic: the web
+		// client is told of a phone's shared screen by one of these ("kMNScreenShareDataStartScreenSharing",
+		// "...EndScreenSharing"), and whether a phone sends the bridge one was never seen.
+		s.log.Info().Str("topic", b.DataMessageRequest.Message.Topic).Int("len", len(b.DataMessageRequest.Message.Data)).
+			Msg("Messenger call data message")
 	}
 	return s.respond(msg, rtcsignal.DefaultResponseBody(msg))
 }
@@ -619,6 +624,15 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 		Str("sdp_type", sdpType).
 		Bool("renegotiation_requested", smu.RenegotiationRequested).
 		Bool("has_renegotiation_offer", smu.RenegotiationOffer != nil && smu.RenegotiationOffer.SDP != "").
+		// An SDP can also come as a delta or compressed, neither of which a 1:1 call reads: seen
+		// here, that is a renegotiation the bridge sat out.
+		Bool("has_sdp_delta", smu.Update != nil).
+		Bool("compressed_sdp", sd != nil && sd.SDP == "" && len(sd.CompressedData) > 0).
+		// What the server lets the two sides do with a second video stream, worked out from what
+		// both said they support: the web client told no puts a shared screen in its camera's
+		// track instead of adding one.
+		Bool("multiple_video_streams_allowed", smu.MultipleVideoStreamsAllowed).
+		Bool("screen_share_stream_allowed", smu.ScreenShareStreamAllowed).
 		Strs("our_tracks", ours).
 		Dict("media_status", tracks).
 		Msg("Messenger media update")
@@ -680,7 +694,9 @@ func (s *callSession) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal
 			break
 		}
 		// With the offer's shape: what a phone adds when it shares its screen is only visible here.
-		callbridge.LogSDPShape(s.log.Info(), sd.SDP).Bool("leg_plan_b", leg.IsPlanB()).Msg("Answered Messenger renegotiation")
+		callbridge.LogSDPShape(s.log.Info(), sd.SDP).Bool("leg_plan_b", leg.IsPlanB()).
+			Strs("video_formats", metacall.VideoFormats(sd.SDP)).Strs("accepted", metacall.VideoFormats(answer)).
+			Msg("Answered Messenger renegotiation")
 		resp.Answer = &rtcsignal.SessionDescription{SDP: answer}
 		// In MatrixRTC calls the video relay is already waiting for Messenger's camera.
 		if s.videoCodec == "" && offersVideo && !s.rtcMode {
@@ -1001,6 +1017,7 @@ func (cb *callBridge) startIncoming(ctx context.Context, msg *rtcsignal.Message)
 		Bool("has_plain_offer", ring.Offer != nil && ring.Offer.SDP != "").
 		Bool("has_unified_offer", ring.UnifiedOffer != nil && ring.UnifiedOffer.SDP != "").
 		Bool("legacy_call", ring.IsLegacyCall).
+		Strs("video_formats", metacall.VideoFormats(offerSDP)).
 		Msg("Messenger offer")
 	if err = s.verifyPeerSDP(offerSDP, caller); err != nil {
 		s.log.Warn().Err(err).Msg("Caller's x-dtls-auth doesn't verify, not bridging")
@@ -1306,6 +1323,7 @@ func (s *callSession) newMetaLeg() (*callbridge.Leg, error) {
 	}
 	leg.OnCandidate(s.onLocalMetaCandidate)
 	leg.OnState(s.onMetaState)
+	leg.OnData(s.onMetaData)
 	s.lock.Lock()
 	s.metaLeg = leg
 	pending := s.remoteCands
@@ -1315,6 +1333,39 @@ func (s *callSession) newMetaLeg() (*callbridge.Leg, error) {
 		_ = leg.AddCandidate(c)
 	}
 	return leg, nil
+}
+
+// onMetaData logs what Messenger's side says over the 1:1 call's data channels: the channel, and
+// for a signalling message its type and topic, never the contents. Nothing is acted on. The web
+// client has channels a phone could announce a shared screen on ("screenshare_start_sctp",
+// "screenshare_stop_sctp"), and the bridge didn't look at the channels of a 1:1 call at all. The
+// first message on each channel is logged at info, the rest at debug.
+func (s *callSession) onMetaData(label string, data []byte) {
+	s.lock.Lock()
+	first := !s.metaDataSeen[label]
+	if first {
+		if s.metaDataSeen == nil {
+			s.metaDataSeen = map[string]bool{}
+		}
+		s.metaDataSeen[label] = true
+	}
+	s.lock.Unlock()
+	ev := s.log.Debug()
+	if first {
+		ev = s.log.Info()
+	}
+	ev = ev.Str("channel", label).Int("len", len(data))
+	msg, err := rtcsignal.DecodePayload(data, true)
+	if err != nil {
+		msg, err = rtcsignal.Unmarshal(data)
+	}
+	if err == nil {
+		ev = ev.Stringer("type", msg.Header.Type).Str("body", msg.Body.Name())
+		if dm := msg.Body.DataMessageRequest; dm != nil && dm.Message != nil {
+			ev = ev.Str("topic", dm.Message.Topic)
+		}
+	}
+	ev.Msg("Messenger data channel message")
 }
 
 // join sends the JOIN and processes the response.
@@ -1373,6 +1424,8 @@ func (s *callSession) joinOnce(cc *rtcsignal.CallContext, params *rtcsignal.Join
 		Int32("media_path", int32(jr.MediaPath)).
 		Bool("has_answer", jr.Answer != nil && jr.Answer.SDP != "").
 		Bool("relay_info", jr.RelayInfo != nil).
+		Bool("multiple_video_streams_allowed", jr.MultipleVideoStreamsAllowed).
+		Bool("screen_share_stream_allowed", jr.ScreenShareStreamAllowed).
 		Msg("Joined Messenger call")
 	if jr.MediaPath == rtcsignal.MediaPathSFU {
 		return errSFUPath
@@ -1426,6 +1479,10 @@ func (s *callSession) buildMessengerAnswer() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create Messenger answer: %w", err)
 	}
+	// What we let the caller send: a phone offers H264 under two payload types (two profiles), and
+	// the answer keeps only those matching the one profile the leg registers.
+	s.log.Info().Strs("offered", metacall.VideoFormats(offer)).Strs("accepted", metacall.VideoFormats(answer)).
+		Msg("Video formats agreed with Messenger")
 	return answer, nil
 }
 

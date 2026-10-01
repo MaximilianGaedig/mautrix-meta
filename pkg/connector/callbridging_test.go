@@ -178,3 +178,46 @@ func TestReadStreamMetadata(t *testing.T) {
 		}
 	}
 }
+
+// What comes in over a 1:1 call's data channels is logged by channel, and for a signalling message
+// by type and topic - the first on each channel at info - and its contents never are. A phone that
+// announces a shared screen over one was invisible: the bridge didn't look at these channels.
+func TestMessengerDataChannelMessagesAreLogged(t *testing.T) {
+	var out strings.Builder
+	s := &callSession{cb: &callBridge{log: zerolog.Nop()}, log: zerolog.New(&out)}
+	announce, err := (&rtcsignal.Message{
+		Header: rtcsignal.Header{Type: rtcsignal.TypeDataMessage, ConferenceName: "ROOM:1", TransactionID: "1"},
+		Body: rtcsignal.Body{DataMessageRequest: &rtcsignal.DataMessageRequest{Message: &rtcsignal.DataMessage{
+			Topic: "screenshare_start_sctp", Data: []byte(`{"user_id":"100000000000001"}`),
+		}}},
+	}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.onMetaData("screenshare_start_sctp", announce)
+	s.onMetaData("screenshare_start_sctp", announce)
+	s.onMetaData("other", []byte("not a signalling message"))
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("logged %d lines, want 3: %s", len(lines), out.String())
+	}
+	var first, second, third map[string]any
+	for i, into := range []*map[string]any{&first, &second, &third} {
+		if err = json.Unmarshal([]byte(lines[i]), into); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first["level"] != "info" || first["channel"] != "screenshare_start_sctp" || first["topic"] != "screenshare_start_sctp" || first["type"] != "DATA_MESSAGE" {
+		t.Errorf("first message on a channel: %v", first)
+	}
+	if second["level"] != "debug" {
+		t.Errorf("a repeat on the same channel is logged at %v, want debug", second["level"])
+	}
+	if third["level"] != "info" || third["channel"] != "other" || third["len"] != float64(24) || third["topic"] != nil {
+		t.Errorf("a message that isn't signalling: %v", third)
+	}
+	if strings.Contains(out.String(), "100000000000001") || strings.Contains(out.String(), "not a signalling") {
+		t.Errorf("message contents were logged: %s", out.String())
+	}
+}
