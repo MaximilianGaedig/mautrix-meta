@@ -165,3 +165,41 @@ func TestGroupCallAbandonedOnceEveryoneLeft(t *testing.T) {
 		t.Fatal("a call everyone left isn't abandoned")
 	}
 }
+
+// A participant's media can start before the server says whose it is. The track was dropped as
+// nobody's and never looked at again: a Messenger web participant stayed silent in the Matrix call.
+func TestGroupCallTrackWaitsForItsOwner(t *testing.T) {
+	cb := &callBridge{log: zerolog.Nop(), m: &MetaClient{UserLogin: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "100"}}}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "555"}}}
+	g, err := cb.newGroupCall(context.Background(), portal, "555", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owner := make(chan string, 1)
+	go func() { owner <- g.trackOwner("mic", "", 5*time.Second) }()
+	select {
+	case got := <-owner:
+		t.Fatalf("a track nobody has named yet was given to %q", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	status := map[string]rtcsignal.TrackInfo{"mic": {Enabled: true, Owner: "200", Label: rtcsignal.TrackLabelAudio}}
+	g.handleServerMediaUpdate(&rtcsignal.Message{Body: rtcsignal.Body{ServerMediaUpdateRequest: &rtcsignal.ServerMediaUpdateRequest{MediaStatus: status}}})
+	select {
+	case got := <-owner:
+		if got != "200" {
+			t.Errorf("owner = %q, want the participant the media status named", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the track was not given to its owner once they were named")
+	}
+
+	// A track nobody ever names is given up on, and one named by its stream needs no waiting.
+	if got := g.trackOwner("ghost", "", 20*time.Millisecond); got != "" {
+		t.Errorf("an unnamed track got owner %q", got)
+	}
+	if got := g.trackOwner("other", "300:audio", time.Second); got != "300" {
+		t.Errorf("owner from the stream id = %q", got)
+	}
+}

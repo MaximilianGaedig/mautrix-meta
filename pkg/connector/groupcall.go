@@ -115,6 +115,7 @@ type groupCall struct {
 	pendingCands   []rtcsignal.IceCandidate
 	remoteCands    []webrtc.ICECandidateInit
 	owners         map[string]string // Messenger track id -> owner user id (SMU media status)
+	ownersChanged  chan struct{}     // closed, and replaced, whenever owners gains an entry
 	subscribed     map[string]bool   // video track ids with a TRACK subscription
 	screens        map[string]bool   // track ids that are a participant's shared screen
 	sentMediaState *[2]bool          // the Matrix user's microphone and camera state last told to the SFU
@@ -136,18 +137,19 @@ type groupCall struct {
 func (cb *callBridge) newGroupCall(ctx context.Context, portal *bridgev2.Portal, threadID string, incoming bool) (*groupCall, error) {
 	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	g := &groupCall{
-		cb:           cb,
-		m:            cb.m,
-		ctx:          sctx,
-		cancel:       cancel,
-		portal:       portal,
-		threadID:     threadID,
-		incoming:     incoming,
-		owners:       map[string]string{},
-		subscribed:   map[string]bool{},
-		screens:      map[string]bool{},
-		present:      map[string]bool{},
-		participants: map[string]*groupParticipant{},
+		cb:            cb,
+		m:             cb.m,
+		ctx:           sctx,
+		cancel:        cancel,
+		portal:        portal,
+		threadID:      threadID,
+		incoming:      incoming,
+		owners:        map[string]string{},
+		ownersChanged: make(chan struct{}),
+		subscribed:    map[string]bool{},
+		screens:       map[string]bool{},
+		present:       map[string]bool{},
+		participants:  map[string]*groupParticipant{},
 	}
 	g.log = cb.log.With().
 		Str("call_dir", map[bool]string{true: "incoming", false: "outgoing"}[incoming]).
@@ -929,13 +931,20 @@ func (g *groupCall) handleServerMediaUpdate(msg *rtcsignal.Message) *rtcsignal.M
 	smu := msg.Body.ServerMediaUpdateRequest
 	g.lock.Lock()
 	leg, crypt := g.leg, g.crypt
+	named := false
 	for trackID, ti := range smu.MediaStatus {
 		if ti.Owner != "" {
+			named = named || g.owners[trackID] != ti.Owner
 			g.owners[trackID] = ti.Owner
 			if ti.Label == rtcsignal.TrackLabelScreen {
 				g.screens[trackID] = true
 			}
 		}
+	}
+	if named {
+		// Tracks that started before anyone said whose they are have been waiting for this.
+		close(g.ownersChanged)
+		g.ownersChanged = make(chan struct{})
 	}
 	g.lock.Unlock()
 	if crypt != nil {
@@ -1072,14 +1081,41 @@ func (g *groupCall) handleConferenceState(cs *rtcsignal.ConferenceStateRequest) 
 	}
 }
 
+// trackOwnerWait is how long a track waits to be told whose it is.
+const trackOwnerWait = 15 * time.Second
+
+// trackOwner says whose a track is, waiting for the media status that names them if it has to.
+//
+// Media can start before its owner is named: a track begins with its first packet, and who it
+// belongs to comes in a server media update that may be a moment behind (a Messenger web
+// participant's microphone, joining). Such a track used to be dropped as nobody's and was never
+// looked at again, so that person stayed silent for the whole call.
+func (g *groupCall) trackOwner(trackID, streamID string, wait time.Duration) string {
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	for {
+		g.lock.Lock()
+		owner, changed := g.owners[trackID], g.ownersChanged
+		g.lock.Unlock()
+		if owner == "" {
+			owner, _, _ = strings.Cut(streamID, ":")
+		}
+		if owner != "" {
+			return owner
+		}
+		select {
+		case <-changed:
+		case <-deadline.C:
+			return ""
+		case <-g.ctx.Done():
+			return ""
+		}
+	}
+}
+
 // onRemoteTrack relays a participant's track to their ghost in the Matrix call.
 func (g *groupCall) onRemoteTrack(tr *webrtc.TrackRemote) {
-	g.lock.Lock()
-	owner := g.owners[tr.ID()]
-	g.lock.Unlock()
-	if owner == "" {
-		owner, _, _ = strings.Cut(tr.StreamID(), ":")
-	}
+	owner := g.trackOwner(tr.ID(), tr.StreamID(), trackOwnerWait)
 	log := g.log.With().Str("owner", owner).Stringer("kind", tr.Kind()).Str("track", tr.ID()).Uint32("ssrc", uint32(tr.SSRC())).Logger()
 	log.Info().Str("stream", tr.StreamID()).Msg("Group call track")
 	if owner == "" || owner == strconv.FormatInt(g.m.selfFBID(), 10) {
