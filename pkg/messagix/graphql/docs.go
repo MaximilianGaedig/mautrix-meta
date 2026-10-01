@@ -13,6 +13,17 @@ const IGDSlideDeltaProcessorQuery = "27931342966497053"
 const IGDTypingIndicatorClientSubscription = "27563068933278040"
 
 var GraphQLDocs = map[string]GraphQLDoc{
+	// facebook.com's friending mutations. Not Messenger operations: the ids come out of
+	// facebook.com's own bundle (FriendingCometFriendRequest{Send,Cancel}Mutation_facebookRelayOperation,
+	// as served on 2026-09-19) and, like every doc id, stop working when Meta rotates them.
+	"FriendingCometFriendRequestSendMutation": {
+		DocID:        "28400389149651601",
+		FriendlyName: "FriendingCometFriendRequestSendMutation",
+	},
+	"FriendingCometFriendRequestCancelMutation": {
+		DocID:        "24453541284254355",
+		FriendlyName: "FriendingCometFriendRequestCancelMutation",
+	},
 	"LSPlatformGraphQLLightspeedRequestQuery": {
 		DocID:        "9697184873702141",
 		FriendlyName: "LSPlatformGraphQLLightspeedRequestQuery",
