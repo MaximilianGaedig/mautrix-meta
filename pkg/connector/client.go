@@ -39,12 +39,15 @@ type MetaClient struct {
 	UserLogin *bridgev2.UserLogin
 	Ghost     *bridgev2.Ghost
 
-	stopHandlingTables   atomic.Pointer[context.CancelFunc]
-	initialTable         atomic.Pointer[table.LSTable]
-	initialTableHandled  atomic.Bool
-	parsedTables         chan *parsedTable
-	backfillCollectors   map[int64]*BackfillCollector
-	backfillLock         sync.Mutex
+	stopHandlingTables  atomic.Pointer[context.CancelFunc]
+	initialTable        atomic.Pointer[table.LSTable]
+	initialTableHandled atomic.Bool
+	parsedTables        chan *parsedTable
+	backfillCollectors  map[int64]*BackfillCollector
+	backfillLock        sync.Mutex
+
+	// How far each chat's messages are known to have been delivered.
+	deliveredUpTo        deliveryWatermarks
 	connectLock          sync.Mutex
 	pushRegistrationLock sync.Mutex
 	friendRequestLock    sync.Mutex

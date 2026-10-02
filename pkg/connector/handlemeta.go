@@ -391,6 +391,7 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 	collectPortalEvents(params, tbl.LSSyncUpdateThreadName, m.handleUpdateThreadName, &innerQueue)
 	collectPortalEvents(params, tbl.LSSetThreadImageURL, m.handleSetThreadImage, &innerQueue)
 	collectPortalEvents(params, tbl.LSUpdateReadReceipt, m.handleUpdateReadReceipt, &innerQueue)
+	collectPortalEvents(params, tbl.LSUpdateDeliveryReceipt, m.handleUpdateDeliveryReceipt, &innerQueue)
 	collectPortalEvents(params, tbl.LSMarkThreadReadV2, m.handleMarkThreadRead, &innerQueue)
 	collectPortalEvents(params, tbl.LSUpdateTypingIndicator, m.handleTypingIndicator, &innerQueue)
 	collectPortalEvents(params, tbl.LSDeleteMessage, m.handleDeleteMessage, &innerQueue)

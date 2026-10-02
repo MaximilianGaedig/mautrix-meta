@@ -323,6 +323,10 @@ type LSUpdateDeliveryReceipt struct {
 	Unrecognized map[int]any `json:",omitempty"`
 }
 
+func (ls *LSUpdateDeliveryReceipt) GetThreadKey() int64 {
+	return ls.ThreadKey
+}
+
 type LSUpdateOptimisticContextThreadKeys struct {
 	ThreadKey1 int64 `index:"0" json:",omitempty"`
 	ThreadKey2 int64 `index:"1" json:",omitempty"`
