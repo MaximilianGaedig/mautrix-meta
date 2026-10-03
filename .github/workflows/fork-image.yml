@@ -13,6 +13,7 @@ on:
 permissions:
   contents: write
   packages: write
+  pull-requests: write
 
 concurrency:
   group: fork-image
@@ -38,11 +39,56 @@ jobs:
           git remote add upstream "https://github.com/mautrix/${REPO#mautrix-}.git"
           git fetch upstream main
           before=$(git rev-parse HEAD)
-          git merge --no-edit upstream/main
-          # Fails if upstream changed .github/workflows (GITHUB_TOKEN can't push those);
-          # merge that one by hand.
-          git push origin HEAD:main
-          if [ "$before" != "$(git rev-parse HEAD)" ]; then echo changed=true >> "$GITHUB_OUTPUT"; else echo changed=false >> "$GITHUB_OUTPUT"; fi
+          echo "behind=$(git rev-list --count HEAD..upstream/main)" >> "$GITHUB_OUTPUT"
+          if git merge --no-edit upstream/main; then
+            # Fails if upstream changed .github/workflows (GITHUB_TOKEN can't push those);
+            # merge that one by hand.
+            git push origin HEAD:main
+            echo conflicted=false >> "$GITHUB_OUTPUT"
+            if [ "$before" != "$(git rev-parse HEAD)" ]; then echo changed=true >> "$GITHUB_OUTPUT"; else echo changed=false >> "$GITHUB_OUTPUT"; fi
+          else
+            # The conflict markers stay in the tree: this branch exists to show what disagreed,
+            # which --abort would throw away. Nothing is published, so the running image is
+            # whatever last built cleanly.
+            echo conflicted=true >> "$GITHUB_OUTPUT"
+            echo changed=false >> "$GITHUB_OUTPUT"
+            {
+              echo "files<<EOF"
+              git diff --name-only --diff-filter=U
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open a pull request for a sync that needs a human
+        if: steps.merge.outputs.conflicted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FILES: ${{ steps.merge.outputs.files }}
+          BEHIND: ${{ steps.merge.outputs.behind }}
+        run: |
+          # One branch per day, so a sync that keeps conflicting updates its own branch rather
+          # than opening four pull requests a day.
+          BRANCH="sync-upstream/$(date -u +%Y-%m-%d)"
+          # Commit the conflicted merge where we stand, then push HEAD at the branch. Not a checkout:
+          # git refuses to switch branches with an unresolved index, which is exactly the state this
+          # step runs in, so a checkout here fails precisely when it is needed.
+          git add -A
+          git commit -m "Merge upstream main (conflicts left for review)" --no-edit || true
+          # Asked already today, so somebody may be resolving that branch: leave it alone rather than
+          # pushing over their work.
+          if [ -n "$(gh pr list --head "$BRANCH" --json number --jq '.[].number')" ]; then
+            exit 0
+          fi
+          git push origin "HEAD:refs/heads/$BRANCH"
+          {
+            printf '%s\n\n' "The scheduled sync could not merge upstream cleanly, $BEHIND commits behind."
+            printf '%s\n\n' "The conflict markers are left in this branch on purpose, so what disagreed is visible."
+            printf '%s\n' "Conflicted files:"
+            printf '\n```\n%s\n```\n\n' "$FILES"
+            printf '%s\n' "Until this lands, no new image is published and la-casa keeps running the last clean build."
+            printf '%s\n' "If it will not build after the conflicts are resolved, check mautrix-go: this is a fork chain, and the missing piece is often a sync owed one repository down."
+          } > /tmp/pr-body.md
+          gh pr create --base main --head "$BRANCH" --title "Sync upstream main" --body-file /tmp/pr-body.md
 
   build:
     needs: sync
