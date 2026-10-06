@@ -489,6 +489,9 @@ func (m *MetaClient) handleTableCalls(ctx context.Context, tbl *table.LSTable, p
 	}
 	events, threadKeys := lsCallEvents(tbl, time.Now())
 	for i, evt := range events {
+		if m.isCallThread(threadKeys[i]) {
+			continue
+		}
 		evt.Portal = portalFor(threadKeys[i])
 		m.UserLogin.Log.Debug().
 			Int64("thread_key", threadKeys[i]).
@@ -517,4 +520,62 @@ func (m *MetaClient) queueCallNotice(n *callNotice) {
 	for _, evt := range callLogReports(m.callLog, n, sender) {
 		m.UserLogin.QueueRemoteEvent(evt)
 	}
+}
+
+// noteCallThreads marks the threads behind bridged calls before the table's
+// events are queued. Placing a call joins a Messenger ROOM: conference, and
+// Messenger reports call state for a group thread of its own behind it (and
+// asks to verify the thread exists) seconds later: bridged, that was a new
+// "Empty room" saying "Incoming voice call" for the reader's own outgoing call
+// (MEO-161). A thread with call state but no portal, while a call is or just
+// was bridged, is taken to be that thread.
+func (m *MetaClient) noteCallThreads(ctx context.Context, tbl *table.LSTable, portalFor func(threadKey int64) networkid.PortalKey) {
+	cb := m.callBridge.Load()
+	if cb == nil {
+		return
+	}
+	cb.noteCallThreads(callStateThreads(tbl), func(threadKey int64) bool {
+		portal, err := m.Main.Bridge.GetExistingPortalByKey(ctx, portalFor(threadKey))
+		// A failed lookup counts as a portal: never hide a thread on a guess.
+		return err != nil || (portal != nil && portal.MXID != "")
+	})
+}
+
+// callStateThreads are the threads a table reports call state for.
+func callStateThreads(tbl *table.LSTable) []int64 {
+	seen := map[int64]struct{}{}
+	var threads []int64
+	add := func(threadKey int64) {
+		if _, ok := seen[threadKey]; !ok {
+			seen[threadKey] = struct{}{}
+			threads = append(threads, threadKey)
+		}
+	}
+	for _, row := range tbl.LSUpdateThreadOngoingCallState {
+		add(row.ThreadKey)
+	}
+	for _, row := range tbl.LSUpdateOrInsertRtcOngoingCallData {
+		add(row.ThreadKey)
+	}
+	return threads
+}
+
+// noteCallThreads marks the threads among these that have no portal, while a call is or just was bridged.
+func (cb *callBridge) noteCallThreads(threads []int64, hasPortal func(threadKey int64) bool) {
+	if len(threads) == 0 || !cb.bridgingRecently() {
+		return
+	}
+	for _, threadKey := range threads {
+		if cb.isCallThread(threadKey) || hasPortal(threadKey) {
+			continue
+		}
+		cb.markCallThread(threadKey)
+		cb.log.Debug().Int64("thread_key", threadKey).Msg("Thread with call state during a bridged call has no portal: treating it as the call's own thread")
+	}
+}
+
+// isCallThread reports whether threadKey is the thread behind a bridged call (see noteCallThreads).
+func (m *MetaClient) isCallThread(threadKey int64) bool {
+	cb := m.callBridge.Load()
+	return cb != nil && cb.isCallThread(threadKey)
 }
