@@ -360,8 +360,11 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 	// Similar to above - delete the thread when the user leaves it
 	collectPortalEvents(params, tbl.LSRemoveParticipantFromThread, m.handleSelfLeaveThread, &innerQueue)
 
+	m.noteCallThreads(ctx, tbl, params.portalKeyFor)
 	for _, verifyExists := range threadExists {
-		if _, resyncing := threadResyncs[verifyExists.ThreadKey]; resyncing {
+		if m.isCallThread(verifyExists.ThreadKey) {
+			continue
+		} else if _, resyncing := threadResyncs[verifyExists.ThreadKey]; resyncing {
 			continue
 		} else if _, folder := folderResyncs[verifyExists.ThreadKey]; folder {
 			continue

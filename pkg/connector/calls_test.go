@@ -17,6 +17,8 @@
 package connector
 
 import (
+	"github.com/rs/zerolog"
+
 	"strconv"
 	"testing"
 	"time"
@@ -226,5 +228,28 @@ func TestCallTrackerLSOnly(t *testing.T) {
 	bad := &table.LSTable{LSUpdateThreadOngoingCallState: []*table.LSUpdateThreadOngoingCallState{{ThreadKey: testPeer, OngoingCallState: 1758235000000}}}
 	if events, _ = lsCallEvents(bad, testT0); len(events) != 0 {
 		t.Fatalf("invalid state not ignored: %+v", events)
+	}
+}
+
+// Placing a call joins a ROOM: conference, and Messenger reports call state for a group thread of its own
+// behind it: bridged, that became an "Empty room" saying "Incoming voice call" for the reader's own call (MEO-161).
+func TestCallThreadBehindBridgedCall(t *testing.T) {
+	cb := &callBridge{log: zerolog.Nop()}
+	const dmThread, callThread, otherThread = int64(100041845803761), int64(2222316681608569), int64(42)
+	hasPortal := func(threadKey int64) bool { return threadKey == dmThread }
+
+	// Nothing is bridged: a thread with call state is a call somebody else started, and is left alone.
+	cb.noteCallThreads([]int64{callThread}, hasPortal)
+	if cb.isCallThread(callThread) {
+		t.Fatal("a thread was taken for a call's own while no call was bridged")
+	}
+
+	cb.markBridged(networkid.PortalKey{ID: networkid.PortalID("100041845803761")})
+	cb.noteCallThreads([]int64{dmThread, callThread}, hasPortal)
+	if !cb.isCallThread(callThread) {
+		t.Fatal("the portal-less thread with call state during a bridged call was not taken for the call's own")
+	}
+	if cb.isCallThread(dmThread) || cb.isCallThread(otherThread) {
+		t.Fatal("a thread with a portal, or without call state, was taken for the call's own")
 	}
 }

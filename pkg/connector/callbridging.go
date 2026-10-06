@@ -207,6 +207,11 @@ type callBridge struct {
 	// end), so Messenger's call notifications for it don't also become
 	// "answer on Messenger" / "missed call" text notices.
 	bridged map[networkid.PortalKey]time.Time
+	// callThreads are threads Messenger reported call state for during a
+	// bridged call while no portal existed for them: the hidden group thread
+	// Messenger keeps behind a ROOM: conference. They get no portal and no
+	// call notices (MEO-161).
+	callThreads map[int64]time.Time
 }
 
 // bridgedNoticeWindow is how long after a bridged call its notices are
@@ -225,6 +230,44 @@ func (cb *callBridge) markBridged(key networkid.PortalKey) {
 			delete(cb.bridged, k)
 		}
 	}
+}
+
+// bridgingRecently reports whether any call is, or just was, bridged.
+func (cb *callBridge) bridgingRecently() bool {
+	cb.lock.Lock()
+	defer cb.lock.Unlock()
+	if cb.active != nil {
+		return true
+	}
+	for _, t := range cb.bridged {
+		if time.Since(t) <= bridgedNoticeWindow {
+			return true
+		}
+	}
+	return false
+}
+
+// markCallThread records threadKey as the thread behind a bridged call.
+func (cb *callBridge) markCallThread(threadKey int64) {
+	cb.lock.Lock()
+	defer cb.lock.Unlock()
+	if cb.callThreads == nil {
+		cb.callThreads = map[int64]time.Time{}
+	}
+	cb.callThreads[threadKey] = time.Now()
+	for k, t := range cb.callThreads {
+		if time.Since(t) > bridgedNoticeWindow {
+			delete(cb.callThreads, k)
+		}
+	}
+}
+
+// isCallThread reports whether threadKey was recently seen behind a bridged call.
+func (cb *callBridge) isCallThread(threadKey int64) bool {
+	cb.lock.Lock()
+	defer cb.lock.Unlock()
+	t, ok := cb.callThreads[threadKey]
+	return ok && time.Since(t) <= bridgedNoticeWindow
 }
 
 // recentlyBridged reports whether key has, or just had, a bridged call.
