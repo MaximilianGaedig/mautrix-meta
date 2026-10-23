@@ -370,3 +370,9 @@ func (r ContactViewerRelationship) Name() string {
 		return ""
 	}
 }
+
+type SyncStatus int64
+
+const (
+	SyncStatusResync SyncStatus = 3
+)

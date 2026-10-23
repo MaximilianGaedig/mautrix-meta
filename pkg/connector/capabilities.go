@@ -54,7 +54,7 @@ func (m *MetaConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 }
 
 func (m *MetaConnector) GetBridgeInfoVersion() (info, caps int) {
-	return 1, 20
+	return 1, 21
 }
 
 const MaxTextLength = 20000
@@ -70,7 +70,7 @@ func supportedIfFFmpeg() event.CapabilitySupportLevel {
 }
 
 func capID() string {
-	base := "fi.mau.meta.capabilities.2026_10_02"
+	base := "fi.mau.meta.capabilities.2026_10_23"
 	if ffmpeg.Supported() {
 		return base + "+ffmpeg"
 	}
@@ -235,6 +235,8 @@ func init() {
 		event.StateRoomAvatar.Type: {Level: event.CapLevelFullySupported},
 	}
 	metaCapsGroup.MemberActions = metaCapsWithE2EGroup.MemberActions.Clone()
+
+	metaCaps.BlockUser = true
 
 	// Polls are a Messenger feature, and don't work in encrypted chats, which have no poll task.
 	metaCapsPolls = withPolls(metaCaps)

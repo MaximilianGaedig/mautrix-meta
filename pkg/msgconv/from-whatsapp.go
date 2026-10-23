@@ -42,6 +42,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	_ "golang.org/x/image/webp"
+	"google.golang.org/protobuf/proto"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -49,6 +50,7 @@ import (
 
 	"go.mau.fi/mautrix-meta/pkg/album"
 	"go.mau.fi/mautrix-meta/pkg/messagix"
+	"go.mau.fi/mautrix-meta/pkg/messagix/table"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 	"go.mau.fi/mautrix-meta/pkg/msgconv/mediadl"
 	"go.mau.fi/mautrix-meta/pkg/msgconv/textfmt"
@@ -178,8 +180,9 @@ func convertWhatsAppAttachment[
 	}
 	untypedTransport := any(typedTransport)
 	if stickerTransport, ok := untypedTransport.(*waMediaTransport.StickerTransport); ok {
-		if stickerTransport.Ancillary.GetReceiverFetchID() != "" {
-			err = userVisibleError{Message: "Unsupported sticker, view in Messenger"}
+		if receiverFetchID := stickerTransport.Ancillary.GetReceiverFetchID(); receiverFetchID != "" {
+			metadata = typedTransport.GetAncillary()
+			media, err = mc.reuploadReceiverFetchSticker(ctx, receiverFetchID)
 			return
 		}
 	}
@@ -194,6 +197,22 @@ func convertWhatsAppAttachment[
 	return
 }
 
+func (mc *MessageConverter) reuploadReceiverFetchSticker(ctx context.Context, receiverFetchID string) (*bridgev2.ConvertedMessagePart, error) {
+	client := ctx.Value(mediadl.ContextKeyFBClient).(*messagix.Client)
+	media, err := client.FetchReceiverFetchMedia(ctx, receiverFetchID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch sticker %s: %w", receiverFetchID, err)
+	}
+	return mediadl.ReuploadFileToMatrix(ctx, mediadl.ReuploadParams{
+		AttachmentType: table.AttachmentTypeSticker,
+		URL:            media.URL,
+		MimeType:       media.MimeType,
+		Width:          media.Width,
+		Height:         media.Height,
+		MaxFileSize:    mc.MaxFileSize,
+	})
+}
+
 func (mc *MessageConverter) reuploadWhatsAppAttachment(
 	ctx context.Context,
 	transport *waMediaTransport.WAMediaTransport,
@@ -202,6 +221,11 @@ func (mc *MessageConverter) reuploadWhatsAppAttachment(
 ) (*bridgev2.ConvertedMessagePart, error) {
 	intent := ctx.Value(mediadl.ContextKeyIntent).(bridgev2.MatrixAPI)
 	portal := ctx.Value(mediadl.ContextKeyPortal).(*bridgev2.Portal)
+	paths, _ := ctx.Value(mediadl.ContextKeyWAMediaPaths).(map[string]string)
+	if path := paths[transport.GetAncillary().GetObjectID()]; path != "" && transport.GetIntegral() != nil {
+		transport = proto.CloneOf(transport)
+		transport.Integral.DirectPath = proto.String(path)
+	}
 
 	if mc.DirectMedia {
 		msgID := ctx.Value(mediadl.ContextKeyMsgID).(networkid.MessageID)
@@ -231,7 +255,7 @@ func (mc *MessageConverter) reuploadWhatsAppAttachment(
 			Type:       mediaType,
 			SHA256:     transport.Integral.FileSHA256,
 			EncSHA256:  transport.Integral.FileEncSHA256,
-			DirectPath: *transport.Integral.DirectPath,
+			DirectPath: transport.GetIntegral().GetDirectPath(),
 		})
 		if err != nil {
 			return nil, err
@@ -308,8 +332,12 @@ func addStickerMetadata(converted *bridgev2.ConvertedMessagePart, metadata *waMe
 		return
 	}
 	converted.Type = event.EventSticker
-	converted.Content.Info.Width = int(metadata.GetWidth())
-	converted.Content.Info.Height = int(metadata.GetHeight())
+	if metadata.GetReceiverFetchID() == "" || converted.Content.Info.Width == 0 {
+		converted.Content.Info.Width = int(metadata.GetWidth())
+	}
+	if metadata.GetReceiverFetchID() == "" || converted.Content.Info.Height == 0 {
+		converted.Content.Info.Height = int(metadata.GetHeight())
+	}
 }
 
 func (mc *MessageConverter) convertWhatsAppDocument(ctx context.Context, document *waConsumerApplication.ConsumerApplication_DocumentMessage) (converted, caption *bridgev2.ConvertedMessagePart, err error) {
@@ -512,6 +540,76 @@ func (mc *MessageConverter) waStoryReplyMessageToMatrix(ctx context.Context, con
 	return
 }
 
+func (mc *MessageConverter) waExternalLinkShareToMatrix(ctx context.Context, content *waArmadilloXMA.ExtendedContentMessage) *bridgev2.ConvertedMessagePart {
+	var link string
+	for _, cta := range content.GetCtas() {
+		for _, candidate := range []string{cta.GetNativeURL(), cta.GetActionURL()} {
+			parsed, err := url.Parse(candidate)
+			if err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != "" {
+				link = candidate
+				break
+			}
+		}
+		if link != "" {
+			break
+		}
+	}
+	if link == "" {
+		return nil
+	}
+	body := content.GetMessageText()
+	if !strings.Contains(body, link) {
+		if body == "" {
+			body = link
+		} else {
+			body += "\n\n" + link
+		}
+	}
+	part := mc.WhatsAppTextToMatrix(ctx, &waCommon.MessageText{
+		Text:         &body,
+		MentionedJID: content.GetMentionedJID(),
+		Commands:     content.GetCommands(),
+		Mentions:     content.GetMentions(),
+	})
+	preview := &event.BeeperLinkPreview{
+		LinkPreview: event.LinkPreview{
+			CanonicalURL: link,
+			Title:        content.GetTitleText(),
+			Description:  content.GetSubtitleText(),
+		},
+		MatchedURL: link,
+	}
+	part.Content.BeeperLinkPreviews = []*event.BeeperLinkPreview{preview}
+	for _, rawPreview := range content.GetPreviews() {
+		image, err := armadilloutil.Unmarshal(&waMediaTransport.ImageTransport{}, rawPreview, 2)
+		if err != nil {
+			zerolog.Ctx(ctx).Err(err).Msg("Failed to decode external link preview image")
+			continue
+		}
+		transport := image.GetIntegral().GetTransport()
+		if transport.GetIntegral().GetDirectPath() == "" {
+			continue
+		}
+		converted, err := mc.reuploadWhatsAppAttachment(ctx, transport, whatsmeow.MediaImage, func(ctx context.Context, data []byte, mimeType string) ([]byte, string, string, error) {
+			return data, mimeType, "preview" + exmime.ExtensionFromMimetype(mimeType), nil
+		})
+		if err != nil {
+			zerolog.Ctx(ctx).Err(err).Msg("Failed to reupload external link preview image")
+			continue
+		}
+		addImageMetadata(converted, image.GetAncillary())
+		preview.ImageURL = converted.Content.URL
+		preview.ImageEncryption = converted.Content.File
+		preview.ImageWidth = event.IntOrString(converted.Content.Info.Width)
+		preview.ImageHeight = event.IntOrString(converted.Content.Info.Height)
+		preview.ImageSize = event.IntOrString(converted.Content.Info.Size)
+		preview.ImageType = converted.Content.Info.MimeType
+		part.DBMetadata = converted.DBMetadata
+		break
+	}
+	return part
+}
+
 func (mc *MessageConverter) waExtendedContentMessageToMatrix(ctx context.Context, content *waArmadilloXMA.ExtendedContentMessage) (parts []*bridgev2.ConvertedMessagePart) {
 	body := content.GetMessageText()
 	nativeURL := ""
@@ -538,6 +636,10 @@ func (mc *MessageConverter) waExtendedContentMessageToMatrix(ctx context.Context
 		msgtype = event.MsgNotice
 	}
 	switch content.GetTargetType() {
+	case waArmadilloXMA.ExtendedContentMessage_MSG_EXTERNAL_LINK_SHARE:
+		if part := mc.waExternalLinkShareToMatrix(ctx, content); part != nil {
+			return []*bridgev2.ConvertedMessagePart{part}
+		}
 	case waArmadilloXMA.ExtendedContentMessage_FB_STORY_REPLY:
 		parts, err := mc.waStoryReplyMessageToMatrix(ctx, content)
 		if err != nil {
@@ -752,13 +854,23 @@ func (mc *MessageConverter) WhatsAppToMatrix(
 			}
 		}
 	default:
-		if evt.Message == nil && evt.FBApplication.GetMetadata().GetChatEphemeralSetting() != nil {
-			portal.Metadata.(*metaid.PortalMetadata).EphemeralSettingTimestamp = evt.Info.Timestamp.Unix()
-			portal.UpdateDisappearingSetting(ctx, cm.Disappear, bridgev2.UpdateDisappearingSettingOpts{
-				Sender:    intent,
-				Timestamp: evt.Info.Timestamp,
-				Save:      true,
-			})
+		if disappear := evt.FBApplication.GetMetadata().GetChatEphemeralSetting(); evt.Message == nil && disappear != nil {
+			meta := portal.Metadata.(*metaid.PortalMetadata)
+			dontBridge := cm.Disappear == portal.Disappear
+			if disappear.EphemeralSettingTimestamp == nil || disappear.GetEphemeralSettingTimestamp() > meta.EphemeralSettingTimestamp {
+				meta.EphemeralSettingTimestamp = disappear.GetEphemeralSettingTimestamp()
+				portal.UpdateDisappearingSetting(ctx, cm.Disappear, bridgev2.UpdateDisappearingSettingOpts{
+					Sender:    intent,
+					Timestamp: evt.Info.Timestamp,
+					Save:      true,
+				})
+			} else {
+				dontBridge = true
+				zerolog.Ctx(ctx).Debug().
+					Int64("setting_timestamp", disappear.GetEphemeralSettingTimestamp()).
+					Int64("portal_setting_timestamp", meta.EphemeralSettingTimestamp).
+					Msg("Ignoring outdated disappearing timer change")
+			}
 			cm.Parts = []*bridgev2.ConvertedMessagePart{{
 				Type:    event.EventMessage,
 				Content: bridgev2.DisappearingMessageNotice(cm.Disappear.Timer, false),
@@ -770,7 +882,7 @@ func (mc *MessageConverter) WhatsAppToMatrix(
 						"implicit":   false,
 					},
 				},
-				DontBridge: cm.Disappear == portal.Disappear,
+				DontBridge: dontBridge,
 			}}
 		} else {
 			cm.Parts = []*bridgev2.ConvertedMessagePart{{

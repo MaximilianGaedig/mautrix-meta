@@ -21,6 +21,7 @@ import (
 	"go.mau.fi/mautrix-meta/pkg/messagix/dgw"
 	"go.mau.fi/mautrix-meta/pkg/messagix/endpoints"
 	"go.mau.fi/mautrix-meta/pkg/messagix/httpclient"
+	"go.mau.fi/mautrix-meta/pkg/messagix/securehistory"
 	"go.mau.fi/mautrix-meta/pkg/messagix/socket"
 	"go.mau.fi/mautrix-meta/pkg/messagix/table"
 	"go.mau.fi/mautrix-meta/pkg/messagix/types"
@@ -69,6 +70,8 @@ type Client struct {
 
 	catRefreshLock         sync.Mutex
 	unnecessaryCATRequests int
+
+	receiverFetch receiverFetchState
 
 	stopCurrentConnections atomic.Pointer[context.CancelFunc]
 	connectionLoopStopped  *exsync.Event
@@ -130,6 +133,14 @@ func (c *Client) GetHTTP() *httpclient.HTTPClient {
 	return c.http
 }
 
+func (c *Client) GetSecureHistoryClient() *securehistory.Client {
+	return &securehistory.Client{
+		HTTP:           c.http,
+		RegistrationID: c.configs.BrowserConfigTable.MessengerWebInitData.SessionID,
+		AppID:          c.configs.BrowserConfigTable.CurrentUserInitialData.AppID,
+	}
+}
+
 type dumpedState struct {
 	Configs     *httpclient.Configs
 	SyncStore   map[int64]*socket.QueryMetadata
@@ -166,6 +177,8 @@ func (c *Client) LoadState(state json.RawMessage) error {
 	}
 
 	c.configs = dumped.Configs
+	c.configs.SetClient(c)
+	c.http.SetConfigs(c.configs)
 	c.syncManager = c.newSyncManager()
 	c.syncManager.store = dumped.SyncStore
 	c.updateSocketIDs()

@@ -144,7 +144,7 @@ func (s *Socket) DoOneOffStream(ctx context.Context, payload []byte, noAckOrData
 	if err != nil {
 		if !s.stopping.Load() {
 			go func() {
-				_ = writeFrames(ctx, conn, &EndOfDataFrame{StreamID: streamID})
+				_ = writeFrames(context.WithoutCancel(ctx), conn, &EndOfDataFrame{StreamID: streamID})
 				s.streams.Delete(streamID)
 			}()
 		}
@@ -221,11 +221,12 @@ func (s *Socket) Connect(ctx context.Context) (err error) {
 			return fmt.Errorf("%w: %w", ErrDial, dialErr)
 		}
 		wsConn.SetReadLimit(-1)
-		conn = &connection{connectionTransport: wsConn}
+		conn = newConnection(wsConn, false)
 	}
 	s.conn.Store(conn)
 	if s.stopping.Load() {
 		s.conn.Store(nil)
+		close(conn.done)
 		_ = conn.CloseNow()
 		return nil
 	}
@@ -256,12 +257,13 @@ func (s *Socket) Disconnect() {
 }
 
 const AckTimeout = 5 * time.Second
+const ResponseTimeout = 30 * time.Second
 const PingInterval = 10 * time.Second
 const PongTimeout = 30 * time.Second
 const WriteTimeout = 20 * time.Second
 
 func (s *Socket) readLoop(ctx context.Context, conn *connection) error {
-	done := make(chan struct{})
+	done := conn.done
 	var errorOnce sync.Once
 	var wg sync.WaitGroup
 
@@ -306,6 +308,13 @@ func (s *Socket) readLoop(ctx context.Context, conn *connection) error {
 
 	pongTimeoutTimer := time.NewTimer(PongTimeout)
 	defer pongTimeoutTimer.Stop()
+
+	wg.Add(1)
+	go func() {
+		defer catchPanics("write loop")
+		defer wg.Done()
+		conn.writeLoop(ctx)
+	}()
 
 	incoming := make(chan wrappedDataFrame, 64)
 	wg.Add(1)

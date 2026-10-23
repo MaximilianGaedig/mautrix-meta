@@ -13,11 +13,13 @@ import (
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/cookies"
 	"go.mau.fi/mautrix-meta/pkg/messagix/pushcrypto"
+	"go.mau.fi/mautrix-meta/pkg/messagix/securehistory"
 	"go.mau.fi/mautrix-meta/pkg/messagix/table"
 	"go.mau.fi/mautrix-meta/pkg/messagix/types"
 )
 
 type MessageMetadata struct {
+	FBThreadKey   int64 `json:"fb_thread_key,omitempty"`
 	EditTimestamp int64 `json:"edit_timestamp,omitempty"`
 	// Default direct media meta. Used for blob media, whatsapp media and old XMA media
 	DirectMediaMeta json.RawMessage `json:"direct_media_meta,omitempty"`
@@ -28,6 +30,13 @@ type MessageMetadata struct {
 	XMAFetched   bool          `json:"xma_fetched,omitempty"`
 	// Set on the message that carries a poll.
 	Poll *PollMetadata `json:"poll,omitempty"`
+}
+
+func (m *MessageMetadata) GetFBThreadKey(portalID networkid.PortalID) int64 {
+	if m.FBThreadKey != 0 {
+		return m.FBThreadKey
+	}
+	return ParseFBPortalID(portalID)
 }
 
 type XMAFetchMeta struct {
@@ -51,17 +60,27 @@ type UserLoginMetadata struct {
 	NativeSession          *types.NativeSession          `json:"native_session,omitempty"`
 	NativePushKeys         *pushcrypto.NativePushKeys    `json:"native_push_keys,omitempty"`
 	InstagramNativeSession *types.InstagramNativeSession `json:"instagram_native_session,omitempty"`
+	HistoryDevice          *securehistory.Device         `json:"history_device,omitempty"`
 	// CallDeviceID is the stable device id of the call-signalling
 	// channels (x-dgw-deviceid on rpsignaling, cid on /t_rtc_multi).
 	CallDeviceID string `json:"call_device_id,omitempty"`
 
 	// Thread backfill state
-	BackfillCompleted bool `json:"backfill_completed,omitempty"`
+	BackfillCompleted     bool `json:"backfill_completed,omitempty"`
+	E2EEBackfillCompleted bool `json:"e2ee_backfill_completed,omitempty"`
 
 	// FriendRequestsSentAt is when this login last asked Meta to send a friend request, in unix
 	// seconds, kept only as far back as the rate limit looks. Stored rather than held in memory
 	// so that a restart does not hand out a fresh allowance.
 	FriendRequestsSentAt []int64 `json:"friend_requests_sent_at,omitempty"`
+}
+
+func (m *UserLoginMetadata) CopyFrom(other any) {
+	updated := *other.(*UserLoginMetadata)
+	if m.Platform.IsMessenger() && updated.Platform.IsMessenger() && m.HistoryDevice != nil {
+		updated.HistoryDevice = m.HistoryDevice
+	}
+	*m = updated
 }
 
 func (m *UserLoginMetadata) GeneratePushKeys() {

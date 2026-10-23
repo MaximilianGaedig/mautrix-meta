@@ -42,8 +42,13 @@ type MetaClient struct {
 	stopHandlingTables  atomic.Pointer[context.CancelFunc]
 	initialTable        atomic.Pointer[table.LSTable]
 	initialTableHandled atomic.Bool
-	parsedTables        chan *parsedTable
+	unhandledTables     atomic.Int32
+	parsedTables        []*parsedTable
+	parsedTablesLock    sync.Mutex
+	parsedTablesWake    chan struct{}
+	tableLoopLock       sync.Mutex
 	backfillCollectors  map[int64]*BackfillCollector
+	historyReadStates   *exsync.Map[int64, historyReadState]
 	backfillLock        sync.Mutex
 
 	// How far each chat's messages are known to have been delivered.
@@ -53,6 +58,7 @@ type MetaClient struct {
 	friendRequestLock    sync.Mutex
 	stopConnectAttempt   atomic.Pointer[context.CancelFunc]
 	permanentErrored     atomic.Bool
+	resetReconnecting    atomic.Bool
 
 	editChannels *exsync.Map[string, chan *FBEditEvent]
 
@@ -106,8 +112,9 @@ func (m *MetaConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserL
 		LoginMeta: loginMetadata,
 		UserLogin: login,
 
-		parsedTables:       make(chan *parsedTable, 16),
+		parsedTablesWake:   make(chan struct{}, 1),
 		backfillCollectors: make(map[int64]*BackfillCollector),
+		historyReadStates:  exsync.NewMap[int64, historyReadState](),
 
 		connectBackgroundWAOfflineSync: exsync.NewEvent(),
 
@@ -127,6 +134,8 @@ var (
 	_ bridgev2.CredentialExportingNetworkAPI = (*MetaClient)(nil)
 	_ status.BridgeStateFiller               = (*MetaClient)(nil)
 )
+
+var getProxyClient = &http.Client{Timeout: 30 * time.Second}
 
 type respGetProxy struct {
 	ProxyURL string `json:"proxy_url"`
@@ -150,10 +159,14 @@ func (m *MetaConnector) getProxy(reason string) (string, error) {
 		return "", fmt.Errorf("failed to prepare request: %w", err)
 	}
 	req.Header.Set("User-Agent", mautrix.DefaultUserAgent)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := getProxyClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to send request: %w", err)
-	} else if resp.StatusCode >= 300 || resp.StatusCode < 200 {
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode >= 300 || resp.StatusCode < 200 {
 		return "", fmt.Errorf("unexpected status code %d", resp.StatusCode)
 	}
 	var respData respGetProxy
@@ -197,6 +210,7 @@ func (m *MetaClient) Connect(ctx context.Context) {
 		return
 	}
 	defer m.connectLock.Unlock()
+	m.historyReadStates.Clear()
 	if m.metaState.StateEvent == "" && m.waState.StateEvent == "" {
 		// Ensure both states start at CONNECTING now
 		m.metaState.StateEvent = status.StateConnecting
@@ -306,6 +320,7 @@ func (m *MetaClient) connectWithRetry(retryCtx, ctx context.Context, attempts in
 			m.UserLogin.BridgeState.Send(status.BridgeState{
 				StateEvent: status.StateBadCredentials,
 				Error:      FBAccountSuspended,
+				UserAction: status.UserActionRestart,
 				Info:       map[string]any{"open_url": httpclient.GetErrorRedirectURL(err)},
 			})
 		} else if errors.Is(err, httpclient.ErrCheckpointRequired) {
@@ -332,7 +347,8 @@ func (m *MetaClient) connectWithRetry(retryCtx, ctx context.Context, attempts in
 			m.UserLogin.BridgeState.Send(status.BridgeState{
 				StateEvent: stateEvt,
 				Error:      status.BridgeStateErrorCode(fmt.Sprintf("meta-lserror-%d", lsErr.ErrorCode)),
-				Message:    lsErr.Error(),
+				Message:    "Facebook returned an error while connecting",
+				Info:       map[string]any{"go_error": lsErr.Error()},
 			})
 			if stateEvt == status.StateTransientDisconnect {
 				m.connectWithRetry(retryCtx, ctx, attempts+1)
@@ -556,7 +572,7 @@ func (m *MetaClient) saveConnectionState(ctx context.Context, state json.RawMess
 	}
 	m.lastStateSaveLock.Unlock()
 	if state == nil {
-		if !ratelimited {
+		if ratelimited {
 			return
 		}
 		state, _ = m.Client.DumpState()
@@ -577,6 +593,10 @@ func (m *MetaClient) Disconnect() {
 	if !m.initialTableHandled.Load() {
 		if state != nil {
 			m.UserLogin.Log.Warn().Msg("Initial table wasn't handled before disconnect, not saving reconnection state")
+		}
+	} else if m.unhandledTables.Load() > 0 {
+		if state != nil {
+			m.UserLogin.Log.Warn().Msg("Some tables weren't handled before disconnect, not saving reconnection state")
 		}
 	} else if state != nil {
 		saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -653,6 +673,16 @@ func (m *MetaClient) canReconnectError24() bool {
 	}
 	m.lastError24Reconnect = time.Now()
 	return true
+}
+
+func (m *MetaClient) reconnectAfterNetworkReset() {
+	if !m.resetReconnecting.CompareAndSwap(false, true) {
+		return
+	}
+	defer m.resetReconnecting.Store(false)
+	m.UserLogin.BridgeState.StopUnknownErrorReconnect()
+	m.Disconnect()
+	m.Connect(m.UserLogin.Log.WithContext(m.Main.Bridge.BackgroundCtx))
 }
 
 func (m *MetaClient) FullReconnect() {

@@ -52,6 +52,7 @@ var (
 	_ bridgev2.TagHandlingNetworkAPI             = (*IGClient)(nil)
 	_ bridgev2.RoomNameHandlingNetworkAPI        = (*IGClient)(nil)
 	_ bridgev2.RoomAvatarHandlingNetworkAPI      = (*IGClient)(nil)
+	_ bridgev2.UserBlockingNetworkAPI            = (*IGClient)(nil)
 )
 
 var _ bridgev2.TransactionIDGeneratingNetwork = (*IGConnector)(nil)
@@ -152,7 +153,10 @@ func (ic *IGClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matri
 	log.Debug().Msg("Sending Matrix message to Meta")
 	converted, err := ic.Main.MsgConv.ToInstagram(ctx, ic.Client, msg.Event, msg.Content, msg.ReplyTo, otid, msg.OrigSender != nil, msg.Portal)
 	if err != nil {
-		return nil, err
+		if state := ic.errorToBridgeState(ctx, err); state != nil {
+			ic.UserLogin.BridgeState.Send(*state)
+		}
+		return nil, wrapConversionError(err)
 	}
 
 	var resp interface {
@@ -167,7 +171,7 @@ func (ic *IGClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matri
 		return nil, fmt.Errorf("unexpected converted request type %T", converted)
 	}
 	if err != nil {
-		return nil, err
+		return nil, wrapInstagramError(err)
 	}
 
 	respMsg := resp.GetMessage()
@@ -210,7 +214,7 @@ func (ic *IGClient) HandleMatrixReaction(ctx context.Context, msg *bridgev2.Matr
 		ThreadID:       meta.IGID,
 	}})
 	if err != nil {
-		return nil, err
+		return nil, wrapInstagramError(err)
 	}
 	var reactionTS time.Time
 	for _, react := range resp.Message.Reactions {
@@ -244,7 +248,7 @@ func (ic *IGClient) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev
 		ReactionStatus: slidetypes.ReactionStatusDeleted,
 		ThreadID:       meta.IGID,
 	}})
-	return err
+	return wrapInstagramError(err)
 }
 
 func (ic *IGClient) HandleMatrixEdit(ctx context.Context, edit *bridgev2.MatrixEdit) error {
@@ -260,15 +264,16 @@ func (ic *IGClient) HandleMatrixEdit(ctx context.Context, edit *bridgev2.MatrixE
 	if !ok {
 		return fmt.Errorf("unexpected parsed message ID type")
 	}
+	text, _ := ic.Main.MsgConv.HTMLParser.Parse(ctx, edit.Content, edit.Portal)
 	_, err = ic.Client.EditMessage(ctx, &slidetypes.EditMessageRequest{
 		ThreadID:           meta.IGID,
 		TargetItemID:       "",
-		Body:               slidetypes.SensitiveString{Value: edit.Content.Body},
+		Body:               slidetypes.SensitiveString{Value: text},
 		OfflineThreadingID: strconv.FormatInt(otid, 10),
 		TargetMessageID:    messageID.ID,
 	})
 	if err != nil {
-		return err
+		return wrapInstagramError(err)
 	}
 	edit.EditTarget.EditCount++
 	return nil
@@ -292,7 +297,7 @@ func (ic *IGClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2
 			ThreadID: meta.IGThreadID,
 		},
 	})
-	return err
+	return wrapInstagramError(err)
 }
 
 func (ic *IGClient) HandleMatrixReadReceipt(ctx context.Context, receipt *bridgev2.MatrixReadReceipt) error {
@@ -328,7 +333,7 @@ func (ic *IGClient) HandleMatrixReadReceipt(ctx context.Context, receipt *bridge
 		},
 	})
 	if err != nil {
-		return err
+		return wrapInstagramError(err)
 	}
 	resp2, err := ic.Client.MarkReadValidation(ctx, &slidetypes.MarkReadRequest{
 		Metadata: slidetypes.MarkReadMetadata{IGThreadIGID: meta.IGThreadID},
@@ -338,7 +343,7 @@ func (ic *IGClient) HandleMatrixReadReceipt(ctx context.Context, receipt *bridge
 		},
 	})
 	if err != nil {
-		return err
+		return wrapInstagramError(err)
 	}
 	zerolog.Ctx(ctx).Trace().
 		Any("mark_read_resp", resp1).
@@ -355,6 +360,7 @@ func (ic *IGClient) HandleMatrixDeleteChat(ctx context.Context, chat *bridgev2.M
 	} else if err != nil {
 		return err
 	}
+	leftGroup := false
 	if chat.Portal.RoomType != database.RoomTypeDM {
 		memberInfo, err := ic.Main.Bridge.Matrix.GetMemberInfo(ctx, chat.Portal.MXID, ic.UserLogin.UserMXID)
 		if err != nil {
@@ -363,6 +369,8 @@ func (ic *IGClient) HandleMatrixDeleteChat(ctx context.Context, chat *bridgev2.M
 			_, err = ic.Client.LeaveGroup(ctx, &slidetypes.LeaveThreadRequest{ThreadID: meta.IGID})
 			if err != nil {
 				zerolog.Ctx(ctx).Err(err).Msg("Failed to leave group on delete chat request")
+			} else {
+				leftGroup = true
 			}
 		}
 	}
@@ -370,7 +378,11 @@ func (ic *IGClient) HandleMatrixDeleteChat(ctx context.Context, chat *bridgev2.M
 		ThreadID:   meta.IGID,
 		MarkAsSpam: false,
 	})
-	return err
+	if err != nil && leftGroup {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Ignoring delete thread error after leaving group")
+		return nil
+	}
+	return wrapInstagramError(err)
 }
 
 func (ic *IGClient) HandleMatrixAcceptMessageRequest(ctx context.Context, msg *bridgev2.MatrixAcceptMessageRequest) error {
@@ -385,7 +397,7 @@ func (ic *IGClient) HandleMatrixAcceptMessageRequest(ctx context.Context, msg *b
 		IGInboxFolder:      nil,
 		OfflineThreadingID: strconv.FormatInt(getOTID(msg.InputTransactionID), 10),
 	})
-	return err
+	return wrapInstagramError(err)
 }
 
 func (ic *IGClient) HandleMatrixRoomName(ctx context.Context, msg *bridgev2.MatrixRoomName) (bool, error) {
@@ -396,7 +408,7 @@ func (ic *IGClient) HandleMatrixRoomName(ctx context.Context, msg *bridgev2.Matr
 	// and the IGID is always the same as the FB thread key there.
 	threadID := strconv.FormatInt(metaid.ParseFBPortalID(msg.Portal.ID), 10)
 	err := ic.Client.EditGroupTitle(ctx, threadID, msg.Content.Name)
-	return err == nil, err
+	return err == nil, wrapInstagramError(err)
 }
 
 func (ic *IGClient) HandleMatrixRoomAvatar(ctx context.Context, msg *bridgev2.MatrixRoomAvatar) (bool, error) {
@@ -409,7 +421,7 @@ func (ic *IGClient) HandleMatrixRoomAvatar(ctx context.Context, msg *bridgev2.Ma
 	if msg.Content.URL == "" {
 		err := ic.Client.RemoveGroupAvatar(ctx, threadID)
 		if err != nil {
-			return false, fmt.Errorf("failed to remove Instagram avatar: %w", err)
+			return false, wrapInstagramError(fmt.Errorf("failed to remove Instagram avatar: %w", err))
 		}
 		return true, nil
 	}
@@ -419,7 +431,7 @@ func (ic *IGClient) HandleMatrixRoomAvatar(ctx context.Context, msg *bridgev2.Ma
 	}
 	err = ic.Client.EditGroupAvatar(ctx, threadID, data)
 	if err != nil {
-		return false, fmt.Errorf("failed to set Instagram avatar: %w", err)
+		return false, wrapInstagramError(fmt.Errorf("failed to set Instagram avatar: %w", err))
 	}
 	return true, nil
 }
@@ -471,7 +483,7 @@ func (ic *IGClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.Ma
 		return &bridgev2.MatrixMembershipResult{}, fmt.Errorf("not implemented")
 	}
 	if err != nil {
-		return nil, err
+		return nil, wrapInstagramError(err)
 	}
 	return &bridgev2.MatrixMembershipResult{}, nil
 }
@@ -481,7 +493,7 @@ func (ic *IGClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.Matrix
 	if err != nil {
 		return err
 	}
-	return ic.Client.SetTyping(ctx, meta.IGID, msg.IsTyping)
+	return wrapInstagramError(ic.Client.SetTyping(ctx, meta.IGID, msg.IsTyping))
 }
 
 func (ic *IGClient) HandleMute(ctx context.Context, msg *bridgev2.MatrixMute) error {
@@ -515,4 +527,25 @@ func (ic *IGClient) HandleRoomTag(ctx context.Context, msg *bridgev2.MatrixRoomT
 		Pin:      pinned,
 	})
 	return err
+}
+
+func (ic *IGClient) HandleMatrixBlockUser(ctx context.Context, msg *bridgev2.MatrixBlockUser) error {
+	if ic.Client == nil {
+		return bridgev2.ErrNotLoggedIn
+	}
+	if msg.Content.ReportSpam {
+		return fmt.Errorf("spam reporting is not supported")
+	}
+	userID := metaid.ParseUserID(msg.Portal.OtherUserID)
+	if userID == 0 {
+		return fmt.Errorf("DM recipient is unknown")
+	}
+	igid, err := ic.Main.DB.GetIGUserForFBID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if igid == "" {
+		return fmt.Errorf("recipient Instagram ID is unknown")
+	}
+	return wrapInstagramError(ic.Client.SetUserBlocked(ctx, igid, msg.Content.Block))
 }

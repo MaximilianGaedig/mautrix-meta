@@ -2,37 +2,42 @@ module go.mau.fi/mautrix-meta
 
 go 1.26.0
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 tool go.mau.fi/util/cmd/maubuild
 
 require (
 	github.com/apache/thrift v0.24.0
 	github.com/beeper/poly1305 v0.0.0-20250815183548-d4eede7bbf3c
+	github.com/bytemare/cryptotools v0.0.0-20210309005813-f9985b05742f
+	github.com/bytemare/opaque v0.0.0-20210310201842-16a10d180656
+	github.com/bytemare/voprf v0.0.0-20210221170502-f0af88d24d16
 	github.com/coder/websocket v1.8.15
 	github.com/gabriel-vasile/mimetype v1.4.15
 	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/go-querystring v1.2.0
 	github.com/google/uuid v1.6.0
+	github.com/gtank/ristretto255 v0.2.0
 	github.com/imroc/req/v3 v3.56.0
 	github.com/pion/interceptor v0.1.48
 	github.com/pion/rtp v1.10.5
 	github.com/pion/webrtc/v4 v4.2.20
+	github.com/quic-go/quic-go v0.61.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/rs/zerolog v1.35.1
 	github.com/tetratelabs/wazero v1.12.0
-	github.com/tidwall/gjson v1.19.0
+	github.com/tidwall/gjson v1.20.0
 	github.com/zyedidia/clipboard v1.0.4
 	go.mau.fi/libsignal v0.2.2
-	go.mau.fi/util v0.10.2-0.20260918225449-a4c0d5b86aa8
-	go.mau.fi/whatsmeow v0.0.0-20260919103545-0057a822e79a
-	golang.org/x/crypto v0.57.0
-	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba
-	golang.org/x/image v0.46.0
-	golang.org/x/net v0.59.0
+	go.mau.fi/util v0.11.0
+	go.mau.fi/whatsmeow v0.0.0-20261014094007-f16f9ca30d6a
+	golang.org/x/crypto v0.58.0
+	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e
+	golang.org/x/image v0.47.0
+	golang.org/x/net v0.61.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
-	maunium.net/go/mautrix v0.31.1-0.20260925133620-c6024bacd2e6
+	maunium.net/go/mautrix v0.32.0
 )
 
 require (
@@ -43,6 +48,8 @@ require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/andybalholm/brotli v1.2.4 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
+	github.com/armfazh/h2c-go-ref v0.0.0-20210215173008-07e12a6f8e0d // indirect
+	github.com/armfazh/tozan-ecc v0.1.3 // indirect
 	github.com/beeper/argo-go v1.1.2 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -78,7 +85,7 @@ require (
 	github.com/nats-io/nats.go v1.52.0 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
-	github.com/petermattis/goid v0.0.0-20260820044319-269ab09b5261 // indirect
+	github.com/petermattis/goid v0.0.0-20260918085751-abfca077860b // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.8 // indirect
 	github.com/pion/ice/v4 v4.4.2 // indirect
@@ -98,7 +105,6 @@ require (
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.61.0 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
@@ -107,6 +113,8 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect
 	github.com/vektah/gqlparser/v2 v2.5.27 // indirect
+	github.com/vmihailenco/msgpack/v5 v5.2.0 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yuin/goldmark v1.8.6 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
@@ -117,10 +125,10 @@ require (
 	go.uber.org/zap v1.28.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
@@ -131,4 +139,4 @@ require (
 
 replace github.com/imroc/req/v3 => github.com/beeper/req/v3 v3.0.0-20260925135712-b49593750e56
 
-replace maunium.net/go/mautrix => github.com/MaximilianGaedig/mautrix-go v0.31.1-0.20261003222753-3011dd5f0133
+replace maunium.net/go/mautrix => github.com/MaximilianGaedig/mautrix-go v0.31.1-0.20261023170857-1213d92a6c6c
