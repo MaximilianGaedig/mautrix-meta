@@ -292,6 +292,7 @@ const (
 	StateLandingPage            BrowserState = "landing-page"
 	StateEmailPasswordPage      BrowserState = "enter-email-and-password-page"
 	StateAuthenticationConfirm  BrowserState = "authentication-confirmation-page"
+	StateAuthenticationCodePage BrowserState = "authentication-code-page"
 	StateDialog                 BrowserState = "dialog"
 	StateAccountSelectionPage   BrowserState = "account-selection-page"
 	StateAccountRecoveryPage    BrowserState = "account-recovery-page"
@@ -753,7 +754,8 @@ func NewBrowser(cfg *BrowserConfig) (*Browser, error) {
 				newState = b.profile.twoStepEntrypointState(page)
 				b.profile.logTwoStepEntrypoint(log, page, newState)
 			case "com.bloks.www.two_step_verification.enter_text_captcha_code",
-				"com.bloks.www.caa.ar.sms_captcha":
+				"com.bloks.www.caa.ar.sms_captcha",
+				"com.bloks.www.ap.anti_scripting.text_captcha":
 				newState = StateCaptchaPage
 			case "com.bloks.www.ap.two_step_verification.approve_from_another_device",
 				"com.bloks.www.two_step_verification.approve_from_another_device":
@@ -800,7 +802,8 @@ func NewBrowser(cfg *BrowserConfig) (*Browser, error) {
 				newState = StatePasskeyPage
 			case "com.bloks.www.two_step_verification.no_op_captcha":
 				newState = StateSilentCaptchaPage
-			case "com.bloks.www.two_step_verification.google_recaptcha":
+			case "com.bloks.www.two_step_verification.google_recaptcha",
+				"com.bloks.www.ap.anti_scripting.recaptcha":
 				newState = StateReCaptchaPage
 			case "com.bloks.www.caa.login.password_as_id_confirmation":
 				newState = StateSuggestedAccountPage
@@ -913,7 +916,7 @@ func NewBrowser(cfg *BrowserConfig) (*Browser, error) {
 				}
 				b.LastError = msg
 			case "BLOKS_AUTH_PLATFORM_ENTER_CODE:error_message":
-				if b.State != StateCodeEntryPage {
+				if b.State != StateCodeEntryPage && b.State != StateAuthenticationCodePage {
 					break
 				}
 				msg, ok := value.Value().(string)
@@ -1333,6 +1336,40 @@ func (b *Browser) DoLoginStep(ctx context.Context, userInput map[string]string) 
 			break
 		}
 		btn, clickableTextCount := findAuthenticationConfirmationButton(b.CurrentPage)
+		if btn == nil && b.profile.isInstagram &&
+			b.CurrentPage.FindDescendant(FilterByAttribute("bk.data.TextSpan", "text", "Check your SMS")) != nil {
+			btn = b.CurrentPage.FindDescendant(FilterByAttribute("bk.data.TextSpan", "text", "Try another way")).FindContainingButton()
+			if btn != nil {
+				if err = ctx.Err(); err != nil {
+					return nil, err
+				}
+				choice := userInput["confirmation_action"]
+				if choice == "" {
+					instructions := "Instagram sent a sign-in link by SMS. To use a different verification method, choose Try another way."
+					if b.LastError != "" {
+						instructions = b.LastError + " " + instructions
+						b.LastError = ""
+					}
+					step = &bridgev2.LoginStep{
+						Type:         bridgev2.LoginStepTypeUserInput,
+						StepID:       b.stepID("confirmation_action"),
+						Instructions: instructions,
+						UserInputParams: &bridgev2.LoginUserInputParams{
+							Fields: []bridgev2.LoginInputDataField{{
+								ID: "confirmation_action", Name: "Verification method", Type: bridgev2.LoginInputFieldTypeSelect,
+								Options: []string{"Try another way"},
+							}},
+						},
+					}
+					break
+				}
+				if choice != "Try another way" {
+					return nil, fmt.Errorf("invalid authentication confirmation action")
+				}
+				delete(userInput, "confirmation_action")
+				b.LastError = "Instagram did not advance to another verification method."
+			}
+		}
 		if btn == nil {
 			return nil, fmt.Errorf(
 				"couldn't find authentication confirmation action (clickable_text_count=%d)",
@@ -1433,7 +1470,8 @@ func (b *Browser) DoLoginStep(ctx context.Context, userInput map[string]string) 
 			}
 		}
 
-	case StateCodeEntryPage:
+	case StateCodeEntryPage, StateAuthenticationCodePage:
+		codeState := b.State
 		otpCode := userInput["otp_code"]
 		if otpCode == "" {
 			instructions := b.getCodeInstructions()
@@ -1501,7 +1539,7 @@ func (b *Browser) DoLoginStep(ctx context.Context, userInput map[string]string) 
 				return nil, fmt.Errorf("tapping continue: %w", err)
 			}
 		}
-		b.profile.finishCodeSubmission(b, StateCodeEntryPage, actionRPCCountBefore)
+		b.profile.finishCodeSubmission(b, codeState, actionRPCCountBefore)
 
 	case StateBackupCodePage:
 		backupCode := userInput["backup_code"]
@@ -1730,7 +1768,7 @@ func (b *Browser) DoLoginStep(ctx context.Context, userInput map[string]string) 
 			}
 			step = &bridgev2.LoginStep{
 				Type:         bridgev2.LoginStepTypeCookies,
-				StepID:       "fi.mau.meta.messengerlite.recaptcha",
+				StepID:       b.stepID("recaptcha"),
 				Instructions: "Complete the Google reCAPTCHA challenge.",
 				CookiesParams: &bridgev2.LoginCookiesParams{
 					URL: url,
@@ -1754,7 +1792,6 @@ func (b *Browser) DoLoginStep(ctx context.Context, userInput map[string]string) 
 			}
 			break
 		}
-		log.Debug().Str("recaptcha_token", token).Msg("Got recaptcha token from webview")
 		callback := webview.GetScript("callback")
 		if callback == nil {
 			return nil, fmt.Errorf("reCAPTCHA webview has no callback")
@@ -1790,10 +1827,12 @@ func (b *Browser) DoLoginStep(ctx context.Context, userInput map[string]string) 
 		b.MFACanGoBack = false
 
 		if len(foundMethods) == 0 {
-			if numIgnored == 0 {
-				return nil, fmt.Errorf("couldn't find any mfa types at all")
+			if numIgnored > 0 {
+				return nil, b.profile.errors.NoSupportedMFA
+			} else if b.PreviousPageState == StatePasskeyPage {
+				return nil, b.profile.errors.MandatoryPasskey
 			}
-			return nil, b.profile.errors.NoSupportedMFA
+			return nil, fmt.Errorf("couldn't find any mfa types at all")
 		}
 
 		chosenMethod := userInput["mfatype"]
@@ -2386,7 +2425,7 @@ func (b *Browser) CancelLoginStep(ctx context.Context) error {
 		return fmt.Errorf("current login step cannot be cancelled")
 	}
 	switch b.State {
-	case StateCodeEntryPage, StateBackupCodePage, StateTOTPPage,
+	case StateCodeEntryPage, StateAuthenticationCodePage, StateBackupCodePage, StateTOTPPage,
 		StateSMSPageAfterSend, StateWhatsAppPageAfterSend, StateAFADPageWaiting:
 	default:
 		return fmt.Errorf("current login step cannot be cancelled")
@@ -2408,6 +2447,11 @@ func authenticationConfirmationPageState(page *BloksBundle) BrowserState {
 	if page != nil && page.FindDescendant(FilterByComponent("bk.components.TextInput")) != nil {
 		if input := page.FindDescendant(FilterByAttribute("bk.components.TextInput", "html_name", "password")); input != nil && input.GetAttribute("type") == "password" {
 			return StatePasswordFormPage
+		}
+		inputs := page.FindDescendants(FilterByComponent("bk.components.TextInput"))
+		if len(inputs) == 1 && inputs[0].GetAttribute("type") == "number" &&
+			page.FindDescendant(FilterByAttribute("bk.data.TextSpan", "text", "Enter code")) != nil {
+			return StateAuthenticationCodePage
 		}
 		return StateAccountRecoveryPage
 	}
@@ -2596,7 +2640,7 @@ func findMFAMethodOptions(page *BloksBundle) (map[string]*BloksTreeComponent, []
 	return found, methodNames, unsupportedCount
 }
 
-func twoStepVerificationEntrypointState(page *BloksBundle) BrowserState {
+func (profile browserPlatformProfile) twoStepEntrypointState(page *BloksBundle) BrowserState {
 	if page == nil {
 		return StateMFALandingPage
 	}
@@ -2620,10 +2664,19 @@ func twoStepVerificationEntrypointState(page *BloksBundle) BrowserState {
 		}
 		return StateCodeEntryPage
 	}
-	if foundMethods, _, _ := findMFAMethodOptions(page); len(foundMethods) > 0 {
+	if profile.hasMFAMethodsOnLanding(page) {
 		return StateChooseMFAPage
+	} else if isPasskeyPrompt(page) {
+		return StatePasskeyPage
 	}
 	return StateMFALandingPage
+}
+
+func isPasskeyPrompt(page *BloksBundle) bool {
+	return page.FindDescendant(func(comp *BloksTreeComponent) bool {
+		return comp.ComponentID == "bk.data.TextSpan" &&
+			strings.Contains(strings.ToLower(comp.GetAttribute("text")), "passkey")
+	}) != nil
 }
 
 func classifyMFAMethod(label string) (isMethod, supported bool) {

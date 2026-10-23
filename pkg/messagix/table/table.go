@@ -63,6 +63,9 @@ type LSTable struct {
 	LSInsertXmaAttachment                            []*LSInsertXmaAttachment                            `json:",omitempty"`
 	LSUpdateUnsentMessageCollapsedStatus             []*LSUpdateUnsentMessageCollapsedStatus             `json:",omitempty"`
 	LSDeleteThenInsertMessage                        []*LSDeleteThenInsertMessage                        `json:",omitempty"`
+	LSResetUserBlockStatus                           []*LSResetUserBlockStatus                           `json:",omitempty"`
+	LSUpdateCommunityMemberBlockStatus               []*LSUpdateCommunityMemberBlockStatus               `json:",omitempty"`
+	LSUpdatePublicChannelMemberBlockStatus           []*LSUpdatePublicChannelMemberBlockStatus           `json:",omitempty"`
 	LSUpdateThreadSnippetFromLastMessage             []*LSUpdateThreadSnippetFromLastMessage             `json:",omitempty"`
 	LSUpdateForRollCallMessageDeleted                []*LSUpdateForRollCallMessageDeleted                `json:",omitempty"`
 	LSInsertBlobAttachment                           []*LSInsertBlobAttachment                           `json:",omitempty"`
@@ -152,6 +155,7 @@ type LSTable struct {
 	LSRemoveOptimisticGroupThread                    []*LSRemoveOptimisticGroupThread                    `json:",omitempty"`
 	LSUpdateOrInsertEditMessageHistory               []*LSUpdateOrInsertEditMessageHistory               `json:",omitempty"`
 	LSVerifyHybridThreadExists                       []*LSVerifyHybridThreadExists                       `json:",omitempty"`
+	LSCreateOpenToE2EEThreadLink                     []*LSCreateOpenToE2EEThreadLink                     `json:",omitempty"`
 	LSUpdateThreadAuthorityAndMappingWithOTIDFromJID []*LSUpdateThreadAuthorityAndMappingWithOTIDFromJID `json:",omitempty"`
 	LSVerifyContactParticipantExist                  []*LSVerifyContactParticipantExist                  `json:",omitempty"`
 	LSVerifyCommunityMemberContextualProfileExists   []*LSVerifyCommunityMemberContextualProfileExists   `json:",omitempty"`
@@ -271,6 +275,9 @@ var SPTable = map[string]string{
 	"taskExists":                                     "LSTaskExists",
 	"removeTask":                                     "LSRemoveTask",
 	"deleteThenInsertMessage":                        "LSDeleteThenInsertMessage",
+	"resetUserBlockStatus":                           "LSResetUserBlockStatus",
+	"updateCommunityMemberBlockStatus":               "LSUpdateCommunityMemberBlockStatus",
+	"updatePublicChannelMemberBlockStatus":           "LSUpdatePublicChannelMemberBlockStatus",
 	"deleteThenInsertContact":                        "LSDeleteThenInsertContact",
 	"updateTypingIndicator":                          "LSUpdateTypingIndicator",
 	"checkAuthoritativeMessageExists":                "LSCheckAuthoritativeMessageExists",
@@ -325,6 +332,7 @@ var SPTable = map[string]string{
 	"removeOptimisticGroupThread":                    "LSRemoveOptimisticGroupThread",
 	"updateOrInsertEditMessageHistory":               "LSUpdateOrInsertEditMessageHistory",
 	"verifyHybridThreadExists":                       "LSVerifyHybridThreadExists",
+	"createOpenToE2EEThreadLink":                     "LSCreateOpenToE2EEThreadLink",
 	"updateThreadAuthorityAndMappingWithOTIDFromJID": "LSUpdateThreadAuthorityAndMappingWithOTIDFromJID",
 	"verifyContactParticipantExist":                  "LSVerifyContactParticipantExist",
 	"verifyCommunityMemberContextualProfileExists":   "LSVerifyCommunityMemberContextualProfileExists",
