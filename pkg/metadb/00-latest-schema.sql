@@ -1,4 +1,4 @@
--- v0 -> v17 (compatible with v11+): Latest schema
+-- v0 -> v16 (compatible with v11+): Latest schema
 CREATE TABLE meta_thread (
     parent_key BIGINT NOT NULL,
     thread_key BIGINT NOT NULL,
@@ -106,15 +106,6 @@ CREATE TABLE meta_instagram_login_device (
 	PRIMARY KEY (bridge_id, user_mxid),
 	CONSTRAINT meta_instagram_login_device_user_fkey FOREIGN KEY (bridge_id, user_mxid)
 		REFERENCES "user" (bridge_id, mxid) ON DELETE CASCADE ON UPDATE CASCADE
-);
-
-CREATE TABLE meta_poll (
-    bridge_id  TEXT   NOT NULL,
-    poll_id    BIGINT NOT NULL,
-    thread_key BIGINT NOT NULL,
-    message_id TEXT   NOT NULL,
-
-    PRIMARY KEY (bridge_id, poll_id)
 );
 
 CREATE TABLE meta_thread_cutover (

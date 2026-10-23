@@ -1,4 +1,4 @@
--- v16 (compatible with v11+): Store Messenger thread cutover mappings
+-- v15 (compatible with v11+): Store Messenger thread cutover mappings
 CREATE TABLE meta_thread_cutover (
     bridge_id                 TEXT    NOT NULL,
     login_id                  TEXT    NOT NULL,
