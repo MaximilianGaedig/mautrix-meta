@@ -1,13 +1,12 @@
-# Fork CI: keeps main merged with upstream and publishes the image that
-# la-casa runs (watchtower pulls :latest). Sync and build live in one
-# workflow because pushes made with GITHUB_TOKEN don't trigger other workflows.
+# Fork CI: publishes the image that la-casa runs (watchtower pulls :latest)
+# on every push to main. Upstream is merged by upstream-sync.yml through a
+# pull request (MEO-199); without SYNC_TOKEN that workflow dispatches this one
+# after its merge, because a GITHUB_TOKEN merge triggers no push workflows.
 name: Fork image
 
 on:
   push:
     branches: [main]
-  schedule:
-    - cron: "30 */6 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -19,36 +18,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sync:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.merge.outputs.changed }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - id: merge
-        env:
-          REPO: ${{ github.event.repository.name }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/mautrix/${REPO#mautrix-}.git"
-          git fetch upstream main
-          before=$(git rev-parse HEAD)
-          git merge --no-edit upstream/main
-          # Fails if upstream changed .github/workflows (GITHUB_TOKEN can't push those);
-          # merge that one by hand.
-          git push origin HEAD:main
-          if [ "$before" != "$(git rev-parse HEAD)" ]; then echo changed=true >> "$GITHUB_OUTPUT"; else echo changed=false >> "$GITHUB_OUTPUT"; fi
 
   build:
-    needs: sync
-    if: >-
-      always() && needs.sync.result != 'failure' &&
-      (github.event_name != 'schedule' || needs.sync.outputs.changed == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
